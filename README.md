@@ -18,9 +18,8 @@ server-side credential and call the provider (Slack, GitHub, Linear, Notion, Goo
                                                             Provider
 ```
 
-**Start with [docs/system-design.md](docs/system-design.md)**. It covers requirements, the threat model,
-architecture, the authorization kernel, the request lifecycle, revocation under concurrency, multi-tenant isolation,
-secrets, failure modes, scaling, and trade-offs.
+**Start with [docs/system-design.md](docs/system-design.md)** for a worked example, the authorization path,
+and the tradeoffs around revocation, provider failures, and scaling.
 
 ## Core ideas
 
@@ -28,8 +27,9 @@ secrets, failure modes, scaling, and trade-offs.
   and constraints. An agent can re-delegate to a subagent, but only with less authority, never more.
 - **The authorization kernel is a pure function**: `policies + delegation chain + request + time → Allow | Deny |
   RequireApproval`. It does no I/O, and the type system prevents forging its successful result.
-- **Revocation applies to the next call.** A per-tenant readers–writer gate is held from final revalidation through
-  provider dispatch, so once a revocation commits, no new provider call can start under that authority.
+- **Revocation is coordinated across replicas.** Executions hold a shared tenant gate through dispatch. Revocation
+  commits under the exclusive gate, so later executions revalidate against the updated authority. The design describes
+  the remaining race if the gate session is lost just before dispatch.
 - **Fail closed.** Unknown tools, unselected resources, missing facts, and infrastructure errors never result in an
   allowed call.
 
