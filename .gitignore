@@ -1,0 +1,62 @@
+# Scala / sbt build outputs
+target/
+project/target/
+project/project/
+project/.boot/
+project/.sbtboot/
+project/.ivy/
+project/.coursier/
+project/metals.sbt
+.scala-build/
+.docker-stage/
+.bsp/
+.bloop/
+.metals/
+
+# Compiled / generated files
+__pycache__/
+*.pyc
+*.class
+*.log
+*.tmp
+*.bak
+*.orig
+node_modules/
+dist/
+
+# Local tooling and environment
+.env
+.env.*
+!.env.example
+.secrets/
+cs
+
+# IDE / editor files
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local Codex skill installs
+.agents/
+
+# Claude Code worktrees and local state
+.claude/
+skills-lock.json
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Windows Chrome profiles accidentally created under WSL by Lighthouse
+marketing/C:*/
+
+# Sandbox host: built bridge downloads
+.downloads/

@@ -1,0 +1,49 @@
+#!/usr/bin/env sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+archive_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+
+# Installed archives keep the production jars beside the archive root. During
+# development the same launcher falls back to sbt's staged bridge classpath.
+lib_dir="$archive_root/lib"
+if [ -d "$lib_dir" ]; then
+  # No -quit: BSD/macOS find lacks it.
+  if ! find "$lib_dir" -maxdepth 1 -type f -name '*.jar' 2>/dev/null | grep -q .; then
+    printf '%s\n' 'Hallpass bridge runtime is unavailable. Install a complete bridge archive.' >&2
+    exit 127
+  fi
+elif [ ! -f "$archive_root/VERSION" ] && [ ! -f "$archive_root/manifest.json" ]; then
+  repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
+  source_bridge="$repo_root/bridge/src/main/scala/run/hallpass/bridge"
+  staged_lib="$repo_root/bridge/target/bridge-dist/lib"
+  if [ -f "$repo_root/build.sbt" ] \
+    && [ -d "$source_bridge" ] \
+    && [ -d "$staged_lib" ] \
+    && find "$staged_lib" -maxdepth 1 -type f -name '*.jar' 2>/dev/null | grep -q .; then
+    lib_dir=$staged_lib
+  else
+    printf '%s\n' 'Hallpass bridge runtime is unavailable. Install a complete bridge archive or stage it from a source checkout.' >&2
+    exit 127
+  fi
+else
+  printf '%s\n' 'Hallpass bridge archive is incomplete; refusing staged-classpath fallback.' >&2
+  exit 127
+fi
+
+if ! command -v java >/dev/null 2>&1; then
+  printf '%s\n' 'Java 17 or newer is required to run the Hallpass bridge.' >&2
+  exit 127
+fi
+
+java_version=$(java -version 2>&1 | sed -n '1p')
+version_number=$(printf '%s\n' "$java_version" | sed -nE 's/.*version "([0-9]+)(\.([0-9]+))?.*/\1 \3/p')
+major=${version_number%% *}
+minor=${version_number#* }
+case "$major" in
+  ''|*[!0-9]*) printf '%s\n' 'Unable to determine Java version; Java 17 or newer is required.' >&2; exit 126 ;;
+  1) case "$minor" in ''|*[!0-9]*) ;; *) if [ "$minor" -lt 17 ]; then printf '%s\n' 'Java 17 or newer is required to run the Hallpass bridge.' >&2; exit 126; fi ;; esac ;;
+  *) if [ "$major" -lt 17 ]; then printf '%s\n' 'Java 17 or newer is required to run the Hallpass bridge.' >&2; exit 126; fi ;;
+esac
+
+exec java -cp "$lib_dir/*" run.hallpass.bridge.HallpassMcpMain "$@"

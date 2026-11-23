@@ -1,0 +1,70 @@
+# One-shot schema migration, run before each rollout by the schema owner role.
+# It refuses to run if the owner and runtime roles are the same, if either can
+# bypass RLS, or if the runtime role is missing (see HallpassMigrateMain). The
+# overlay gives the Job a release-specific name, because Jobs are immutable.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: hallpass-migrate
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hallpass-migrate
+    spec:
+      serviceAccountName: hallpass-migrate
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: hallpass-migrate
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HALLPASS_DB_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: hallpass-api
+                  key: HALLPASS_DB_URL
+            - name: HALLPASS_DB_USER
+              value: authai_owner
+            - name: HALLPASS_DB_PASSWORD_FILE
+              value: /run/secrets/hallpass-migrate/db-owner-password
+            - name: HALLPASS_DB_RUNTIME_ROLE
+              value: authai_app
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 768Mi
+          volumeMounts:
+            - name: owner-secret
+              mountPath: /run/secrets/hallpass-migrate
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: owner-secret
+          secret:
+            secretName: hallpass-migrate
+            defaultMode: 0400
+            items:
+              - key: db-owner-password
+                path: db-owner-password
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

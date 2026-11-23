@@ -1,0 +1,495 @@
+#!/usr/bin/env python3
+"""Read-only local diagnostics for one Hallpass agent client."""
+
+from __future__ import annotations
+
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import uuid
+sys.dont_write_bytecode = True  # this directory is a verified install: a __pycache__ in it would fail upgrade and uninstall
+
+
+CLIENTS = ("codex", "claude", "antigravity")
+SUPPORTED_TOOL = "slack_search_messages"
+TOOLS_PATH = "/api/agent/tools"
+JAVA_TIMEOUT_SECONDS = 3.0
+
+
+class DoctorFailure(Exception):
+    """Safe, user-facing diagnostic failure."""
+
+
+def _load_endpoint_module():
+    """Load the sibling endpoint module by path; share one instance so exception classes match across helpers."""
+    path = Path(__file__).absolute().with_name("hallpass_endpoint.py")
+    existing = sys.modules.get("hallpass_endpoint")
+    if existing is not None and getattr(existing, "__file__", None) == str(path):
+        return existing
+    loader = importlib.machinery.SourceFileLoader("hallpass_endpoint", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None or spec.loader is None:
+        raise DoctorFailure("the endpoint helper is missing or invalid; reinstall Hallpass.")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["hallpass_endpoint"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _endpoint_rules():
+    try:
+        return _load_endpoint_module()
+    except (OSError, ImportError, SyntaxError):
+        raise DoctorFailure("the endpoint helper is missing or invalid; reinstall Hallpass.") from None
+
+
+_cached_credential_helper = None
+
+
+def _credential_helper():
+    global _cached_credential_helper
+    if _cached_credential_helper is None:
+        try:
+            _cached_credential_helper = _load_helper(
+                "hallpass_credential_import_for_doctor", Path(__file__).with_name("hallpass-credential-import")
+            )
+        except (OSError, ImportError, SyntaxError):
+            raise DoctorFailure("credential diagnostic helper is missing or invalid; reinstall Hallpass.") from None
+    return _cached_credential_helper
+
+
+def canonical_agent_id(value: str) -> str:
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        raise DoctorFailure("agent ID must be a canonical UUID.") from None
+    if str(parsed) != value:
+        raise DoctorFailure("agent ID must be a canonical lowercase UUID.")
+    return value
+
+
+def _load_helper(name: str, path: Path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None or spec.loader is None:
+        raise DoctorFailure("a required Hallpass diagnostic helper is missing or invalid.")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _data_root(environ: dict[str, str] | os._Environ[str] = os.environ) -> Path:
+    configured = environ.get("XDG_DATA_HOME")
+    if configured:
+        root = Path(configured)
+        if not root.is_absolute() or ".." in root.parts:
+            raise DoctorFailure("XDG_DATA_HOME must be an absolute path without parent segments.")
+    else:
+        home = environ.get("HOME")
+        if not home or not Path(home).is_absolute() or ".." in Path(home).parts:
+            raise DoctorFailure("HOME must be set to an absolute path.")
+        root = Path(home) / ".local" / "share"
+    return root
+
+
+def _safe_file(path: Path, *, executable: bool = False) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(info.st_mode)
+        and not stat.S_ISLNK(info.st_mode)
+        and info.st_uid == os.getuid()
+        and not (stat.S_IMODE(info.st_mode) & 0o022)
+        and (not executable or bool(info.st_mode & 0o111))
+    )
+
+
+def check_bridge_runtime(environ: dict[str, str] | os._Environ[str] = os.environ) -> Path:
+    root = Path(__file__).absolute().parent.parent
+    launcher = root / "bin" / "hallpass-bridge"
+    for directory in (root, root / "bin"):
+        try:
+            directory_info = directory.lstat()
+        except OSError:
+            raise DoctorFailure("installed bridge package is incomplete; reinstall with `hallpass bridge install`.") from None
+        if (not stat.S_ISDIR(directory_info.st_mode) or stat.S_ISLNK(directory_info.st_mode)
+                or directory_info.st_uid != os.getuid() or stat.S_IMODE(directory_info.st_mode) & 0o022):
+            raise DoctorFailure("installed bridge directories are unsafe; reinstall with `hallpass bridge install`.")
+    if not _safe_file(launcher, executable=True):
+        raise DoctorFailure("installed bridge launcher is missing, not executable, or not owned by the current user; run `hallpass bridge install`.")
+    lib = root / "lib"
+    try:
+        lib_info = lib.lstat()
+        jars = [entry for entry in lib.iterdir() if entry.name.endswith(".jar")]
+    except OSError:
+        raise DoctorFailure("installed bridge runtime is missing; run `hallpass bridge install`.") from None
+    if (not stat.S_ISDIR(lib_info.st_mode) or stat.S_ISLNK(lib_info.st_mode)
+            or lib_info.st_uid != os.getuid() or stat.S_IMODE(lib_info.st_mode) & 0o022 or not jars):
+        raise DoctorFailure("installed bridge runtime is missing; run `hallpass bridge install`.")
+    if any(not _safe_file(jar) for jar in jars):
+        raise DoctorFailure("installed bridge runtime contains an unsafe jar; reinstall with `hallpass bridge install`.")
+    if not _safe_file(root / "VERSION") or not _safe_file(root / "manifest.json"):
+        raise DoctorFailure("installed bridge package is incomplete; reinstall with `hallpass bridge install`.")
+    try:
+        result = subprocess.run(
+            ["java", "-version"], capture_output=True, timeout=JAVA_TIMEOUT_SECONDS, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise DoctorFailure("Java 17 or newer is required; install a supported Java runtime and retry.") from None
+    version_text = (result.stderr + result.stdout).decode("utf-8", errors="replace")[:512]
+    match = re.search(r'version "(\d+)(?:\.(\d+))?', version_text)
+    if result.returncode != 0 or match is None:
+        raise DoctorFailure("could not determine the Java runtime version; install Java 17 or newer.")
+    major = int(match.group(1))
+    if major == 1:
+        major = int(match.group(2) or "0")
+    if major < 17:
+        raise DoctorFailure("Java 17 or newer is required to run the Hallpass bridge.")
+    return launcher
+
+
+def read_credential(
+    agent_id: str,
+    client: str,
+    environ: dict[str, str] | os._Environ[str] = os.environ,
+    endpoint: str | None = None,
+) -> str:
+    """The stored credential; with `endpoint`, only if the file binds it to exactly that endpoint."""
+    helper = _credential_helper()
+    rules = _endpoint_rules()
+    try:
+        path = helper.credential_path(agent_id, client, environ)
+        absolute = path.absolute()
+        for component in reversed((absolute, *absolute.parents)):
+            try:
+                component_info = component.lstat()
+            except OSError:
+                continue
+            if stat.S_ISLNK(component_info.st_mode):
+                raise DoctorFailure("credential storage path is unsafe; repair it and re-import the credential.")
+        # Every private Hallpass-owned directory must be a real, current-user-owned
+        # directory with owner-only access. Do not create or repair anything here.
+        for directory in (absolute.parent.parent.parent, absolute.parent.parent, absolute.parent):
+            try:
+                info = directory.lstat()
+            except OSError:
+                raise DoctorFailure("credential file is missing; run `hallpass credential import --agent UUID --client CLIENT`.") from None
+            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                raise DoctorFailure("credential storage path is unsafe; repair it and re-import the credential.")
+            if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+                raise DoctorFailure("credential directory ownership or permissions are unsafe; set directories to mode 700 and re-import.")
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+                raise DoctorFailure("credential file ownership or permissions are unsafe; set the file to mode 600 and re-import.")
+            raw = os.read(fd, rules.MAX_PROFILE_BYTES + 1)
+        finally:
+            os.close(fd)
+        profile = rules.parse_profile(raw)
+        if profile is None:
+            raise DoctorFailure("credential file has an invalid format; re-import it.")
+        try:
+            value = profile.credential
+            helper.validate_credential(value)
+        except helper.ImportFailure:
+            raise DoctorFailure("credential file has an invalid format; re-import it.") from None
+        if endpoint is not None and profile.endpoint != endpoint:
+            raise DoctorFailure(
+                f"credential file is bound to {profile.endpoint}, not {endpoint}; it is not sent anywhere else. "
+                f"Re-import it with `hallpass credential import --agent {agent_id} --client {client} --url {endpoint} --rotate`."
+            )
+        return value
+    except DoctorFailure:
+        raise
+    except helper.ImportFailure as error:
+        # Use only fixed helper diagnostics; never surface file contents.
+        raise DoctorFailure(str(error)) from None
+    except OSError:
+        raise DoctorFailure("credential file cannot be read safely; repair permissions and re-import it.") from None
+
+
+def authenticated_agent_id(credential: str, endpoint: str) -> str:
+    helper = _credential_helper()
+    try:
+        return helper.authenticated_agent_id(credential, endpoint)
+    except helper.ImportFailure as error:
+        raise DoctorFailure(str(error)) from None
+
+
+def visible_tools(credential: str, endpoint: str) -> tuple[str, ...]:
+    """List tools through the same fixed-path, non-redirecting, bounded client the importer uses."""
+    rules = _endpoint_rules()
+    try:
+        decoded = rules.get_json(endpoint, TOOLS_PATH, credential)
+    except rules.RequestFailure as failure:
+        shared = rules.describe_failure(failure, "tool listing")
+        if shared is not None:
+            raise DoctorFailure(shared if failure.kind in ("too_large", "bad_length", "malformed") else f"tool listing failed: {shared}") from None
+        if failure.kind == "status":
+            raise DoctorFailure(f"tool listing failed (HTTP {failure.status}) at {endpoint}; check the agent service and credential status.") from None
+        raise DoctorFailure(f"agent API at {endpoint} is unavailable while listing tools.") from None
+    except rules.EndpointError:
+        raise DoctorFailure("the endpoint is not acceptable; re-import the credential with a valid --url.") from None
+    if not isinstance(decoded, dict) or set(decoded) != {"tools"} or not isinstance(decoded["tools"], list):
+        raise DoctorFailure("tool listing response was malformed.")
+    names = []
+    for tool in decoded["tools"]:
+        if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
+            raise DoctorFailure("tool listing response was malformed.")
+        names.append(tool["name"])
+    return tuple(names)
+
+
+def resolve_endpoint(agent_id: str, client: str, url: str | None, environ) -> tuple[str, bool]:
+    """The endpoint this credential was imported for, and whether it was recorded.
+
+    A credential imported before endpoints were recorded falls back to the local default. `--url` may only confirm the
+    recorded endpoint: a credential is never sent somewhere it was not verified against.
+    """
+    helper = _credential_helper()
+    rules = _endpoint_rules()
+    try:
+        recorded = helper.stored_endpoint(agent_id, client, environ)
+        requested = rules.normalize_endpoint(url) if url is not None else None
+    except helper.ImportFailure as error:
+        raise DoctorFailure(str(error)) from None
+    except rules.EndpointError as error:
+        raise DoctorFailure(f"--url is not acceptable: {error}") from None
+    endpoint = recorded if recorded is not None else rules.DEFAULT_ENDPOINT
+    if requested is not None and requested != endpoint:
+        raise DoctorFailure(
+            f"--url {requested} differs from the endpoint this credential was imported for ({endpoint}); "
+            f"re-import it with `hallpass credential import --agent {agent_id} --client {client} --url {requested} --rotate`."
+        )
+    return endpoint, recorded is not None
+
+
+
+
+def _client_config_module():
+    path = Path(__file__).with_name("hallpass_client_config.py")
+    if not path.is_file():
+        raise DoctorFailure("client registration helper is missing from this package; reinstall Hallpass.")
+    try:
+        return _load_helper("hallpass_client_config_for_doctor", path)
+    except (OSError, ImportError, SyntaxError):
+        raise DoctorFailure("client registration helper is missing or invalid; reinstall Hallpass.") from None
+
+
+def resolve_server_name(client: str, agent_id: str, name: str | None, environ) -> str:
+    """The MCP server name this check inspects: `--name`, else the name `setup` recorded, else the agent's default."""
+    module = _client_config_module()
+    try:
+        resolved, _recorded = module.resolve_server_name(agent_id, client, name, environ)
+    except module.ConfigFailure as error:
+        raise DoctorFailure(str(error)) from None
+    return resolved
+
+
+def _registration_status(
+    client: str, agent_id: str, launcher: Path, environ: dict[str, str] | os._Environ[str], endpoint: str | None = None, name: str | None = None
+):
+    path = Path(__file__).with_name("hallpass_client_config.py")
+    if not path.is_file():
+        raise DoctorFailure("client registration helper is missing from this package; reinstall Hallpass.")
+    try:
+        module = _load_helper("hallpass_client_config_for_doctor", path)
+        return module.registration_status(client, agent_id, launcher, environ=environ, endpoint=endpoint, name=name)
+    except Exception as error:
+        # Registration diagnostics must be safe even if a parser exception includes config text, so keep the
+        # failure fixed; the exception's type and frames are opt-in (HALLPASS_DEBUG=1).
+        status = getattr(error, "status", None)
+        if status is not None:
+            return status
+        _endpoint_rules().report_unexpected(error, "could not safely inspect client registration.")
+        raise DoctorFailure("could not safely inspect client registration; check the client configuration file.") from None
+
+
+def _status_name(status) -> str:
+    status = getattr(status, "state", status)
+    value = getattr(status, "value", status)
+    return str(value).rsplit(".", 1)[-1].upper().replace("-", "_")
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="hallpass doctor", description="Check one local Hallpass client connection.")
+    parser.add_argument("--client", required=True, choices=CLIENTS)
+    parser.add_argument("--agent", required=True, metavar="UUID")
+    parser.add_argument(
+        "--url",
+        metavar="URL",
+        help="confirm the agent API endpoint; it must equal the endpoint recorded when the credential was imported",
+    )
+    parser.add_argument(
+        "--name",
+        metavar="NAME",
+        help="the MCP server name to check (hallpass-<name>). Default: the name recorded by setup, else hallpass-<first 8 hex of the agent ID>",
+    )
+    return parser
+
+
+def _repair_hint(endpoint: str) -> str:
+    rules = _endpoint_rules()
+    try:
+        return rules.endpoint_repair_hint(endpoint)
+    except rules.EndpointError:
+        return "verify the agent API is reachable and retry"
+
+
+def run(
+    client: str, agent: str, *, environ: dict[str, str] | os._Environ[str] = os.environ, url: str | None = None, name: str | None = None
+) -> int:
+    try:
+        agent_id = canonical_agent_id(agent)
+    except DoctorFailure as error:
+        print(f"FAIL  Agent ID: {error}")
+        return 1
+    try:
+        server_name = resolve_server_name(client, agent_id, name, environ)
+    except DoctorFailure as error:
+        print(f"FAIL  Server name: {error}")
+        return 1
+    print(f"Hallpass doctor — client {client}, agent {agent_id}, server name {server_name}")
+    name_option = f" --name {server_name}" if name is not None else ""
+    failures = 0
+
+    endpoint: str | None = None
+    try:
+        endpoint, recorded = resolve_endpoint(agent_id, client, url, environ)
+        if recorded:
+            print(f"PASS  Endpoint: {endpoint} (recorded when this credential was imported).")
+        else:
+            print(
+                f"NOTE  Endpoint: none was recorded for this credential (imported before endpoints were stored), "
+                f"so {endpoint} is assumed. If your agent API is elsewhere, re-import with "
+                f"`hallpass credential import --agent {agent_id} --client {client} --url URL --rotate`."
+            )
+    except DoctorFailure as error:
+        failures += 1
+        print(f"FAIL  Endpoint: {error}")
+
+    launcher = None
+    try:
+        launcher = check_bridge_runtime(environ)
+        print("PASS  Installed bridge launcher and Java 17+ runtime are available.")
+    except DoctorFailure as error:
+        failures += 1
+        print(f"FAIL  Bridge runtime: {error}")
+
+    if launcher is not None and endpoint is not None:
+        try:
+            status = _registration_status(client, agent_id, launcher, environ, endpoint, server_name)
+            registration = _status_name(status)
+            status_message = " ".join(str(getattr(status, "message", "")).split())[:400]
+            if registration == "REGISTERED":
+                print(f"PASS  Client registration `{server_name}` matches this agent, endpoint, and installed bridge.")
+                if client == "claude":
+                    print(f"NOTE  In Claude Code the tool is `mcp__{server_name}__{SUPPORTED_TOOL}`; confirm `{server_name}` in `/mcp` for the current project.")
+            elif registration == "NOT_REGISTERED":
+                failures += 1
+                print(f"FAIL  Client registration `{server_name}` is missing; run `hallpass setup {client} --agent {agent_id}{name_option}`.")
+                print("      Note: releases before per-agent names registered `hallpass-slack`; setup migrates that entry when it belongs to this agent.")
+            elif registration == "CONFLICT":
+                failures += 1
+                print(f"FAIL  Client registration `{server_name}` points to a different setup (another agent, endpoint, or bridge, or not Hallpass).")
+                print(
+                    f"      Repair: `hallpass setup {client} --agent {agent_id}{name_option} --replace` shows what it replaces before changing anything, "
+                    f"or register this agent under another name with `--name hallpass-<name>`."
+                )
+                if status_message:
+                    print(f"      Detail: {status_message}")
+            elif registration == "UNAVAILABLE":
+                failures += 1
+                print("FAIL  Client registration could not be inspected; close the client and check that its config is readable.")
+                if status_message:
+                    print(f"      Repair: {status_message}")
+            else:
+                failures += 1
+                print("FAIL  Client registration is malformed or unsafe; repair the client config, then rerun setup.")
+                if status_message:
+                    print(f"      Repair: {status_message}")
+        except DoctorFailure as error:
+            failures += 1
+            print(f"FAIL  Client registration: {error}")
+    elif launcher is None:
+        print("SKIP  Client registration could not be checked until the bridge runtime is repaired.")
+    else:
+        print("SKIP  Client registration was not checked because the endpoint could not be resolved.")
+
+    credential = None
+    try:
+        credential = read_credential(agent_id, client, environ, endpoint)
+        print("PASS  Protected credential file is owned by the current user and mode 600.")
+    except DoctorFailure as error:
+        failures += 1
+        print(f"FAIL  Credential file: {error}")
+
+    authenticated = False
+    if credential is not None and endpoint is not None:
+        try:
+            actual_agent = authenticated_agent_id(credential, endpoint)
+            if actual_agent != agent_id:
+                failures += 1
+                print("FAIL  Authentication: credential belongs to a different agent; re-import the correct credential.")
+            else:
+                authenticated = True
+                print(f"PASS  Authentication: {endpoint} verified the exact requested agent ID.")
+        except DoctorFailure as error:
+            failures += 1
+            print(f"FAIL  Authentication: {error}")
+            if "HTTP 401" in str(error) or "HTTP 403" in str(error):
+                print("      Repair: credential may be revoked; enroll/import a current credential in the admin UI.")
+            elif "unavailable" in str(error):
+                print(f"      Repair: {_repair_hint(endpoint)}.")
+
+    if authenticated:
+        try:
+            names = visible_tools(credential, endpoint)
+            print("PASS  Agent API is reachable and authenticated tool listing completed.")
+            if SUPPORTED_TOOL in names:
+                print(f"PASS  Tool visibility: {SUPPORTED_TOOL} is available to this agent.")
+            else:
+                failures += 1
+                print(f"FAIL  Tool visibility: {SUPPORTED_TOOL} is not currently available; review the agent's delegation, policy, and tool mapping in the admin UI.")
+        except DoctorFailure as error:
+            failures += 1
+            print(f"FAIL  Tool listing: {error}")
+            if "unavailable" in str(error):
+                print(f"      Repair: {_repair_hint(endpoint)}.")
+    else:
+        print("SKIP  Tool visibility was not checked because authentication did not succeed.")
+
+    if failures:
+        print("Review the admin activity view for completed executions. Doctor does not invoke tools or search Slack.")
+        return 1
+    print("All checks passed. Review the admin activity view for completed executions. Doctor does not invoke tools or search Slack.")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        return run(args.client, args.agent, url=args.url, name=args.name)
+    except Exception as error:
+        try:
+            report = _endpoint_rules().report_unexpected
+        except DoctorFailure:
+            print("hallpass: doctor failed unexpectedly. Set HALLPASS_DEBUG=1 for details.", file=sys.stderr)
+            return 1
+        report(error, "doctor failed unexpectedly.")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

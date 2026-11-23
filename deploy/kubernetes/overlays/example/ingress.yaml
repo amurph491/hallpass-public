@@ -1,0 +1,48 @@
+# TLS-terminating ingress. The admin host serves the UI and routes /api/ to the
+# management listener, so the browser is same-origin with the API. The agent
+# host exposes only the agent listener's /api/agent/ paths; nothing else of the
+# server is reachable from it. The ingress controller's namespace must carry
+# the label hallpass.run/ingress=true (see the NetworkPolicies).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hallpass
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: 64k
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "35"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["admin.hallpass.example.com"]
+      secretName: hallpass-admin-tls
+    - hosts: ["agents.hallpass.example.com"]
+      secretName: hallpass-agents-tls
+  rules:
+    - host: admin.hallpass.example.com
+      http:
+        paths:
+          - path: /api/
+            pathType: Prefix
+            backend:
+              service:
+                name: hallpass-api
+                port:
+                  name: management
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hallpass-admin-ui
+                port:
+                  name: http
+    - host: agents.hallpass.example.com
+      http:
+        paths:
+          - path: /api/agent/
+            pathType: Prefix
+            backend:
+              service:
+                name: hallpass-api
+                port:
+                  name: agent

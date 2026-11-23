@@ -1,0 +1,438 @@
+#!/usr/bin/env sh
+set -eu
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  hallpass version
+  hallpass verify
+  hallpass bridge install [--prefix DIRECTORY]
+  hallpass bridge upgrade [--prefix DIRECTORY]
+  hallpass bridge check [--prefix DIRECTORY]
+  hallpass bridge repair [--prefix DIRECTORY]
+  hallpass bridge uninstall [--prefix DIRECTORY]
+  hallpass credential import --agent UUID --client codex|claude|antigravity [--url URL] [--rotate]
+  hallpass setup codex|claude|antigravity --agent UUID [--url URL] [--name NAME] [--replace]
+  hallpass doctor --client codex|claude|antigravity --agent UUID [--url URL] [--name NAME]
+  hallpass connect codex|claude|antigravity --agent UUID [--url URL] [--name NAME] [--rotate] [--replace]
+  hallpass remove --client codex|claude|antigravity [--agent UUID [--name NAME]]
+
+Each agent is registered in a client under its own MCP server name, hallpass-<slug>
+(--name; default hallpass-<first 8 hex of the agent ID>), so one client can host several
+agents. The name labels the client entry only; the credential selects the agent. Setup
+records the name beside the credential and reuses it. `remove --agent` removes that
+agent's entry; `remove` with no --agent removes the legacy hallpass-slack entry.
+
+The bridge is installed under PREFIX/bridge. The default prefix is
+~/.local/share/hallpass. Bridge installation does not import credentials or edit client
+configuration. Setup registers one verified agent with a local client. Upgrade
+replaces an existing installation with the archive this command runs from, checks the
+result, and removes the old copy only if it is still exactly the files it was installed
+with. Check confirms the installation is complete and unmodified. Repair replaces a
+damaged or modified installation with the archive this command runs from; it touches
+nothing outside PREFIX/bridge (credentials and client configuration are kept) and
+never deletes a file inside it that it does not recognize.
+USAGE
+}
+
+fail() {
+  printf 'hallpass: %s\n' "$1" >&2
+  exit "${2:-2}"
+}
+
+# The install directory is verified against its manifest, so Python must never write bytecode caches into it
+# (a bin/__pycache__ is not in the manifest and would make upgrade and uninstall refuse the install).
+PYTHONDONTWRITEBYTECODE=1
+export PYTHONDONTWRITEBYTECODE
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+archive_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+default_prefix=${XDG_DATA_HOME:-"${HOME:-}/.local/share"}/hallpass
+
+verify_archive_at() {
+  root=$1
+  [ -f "$root/VERSION" ] || fail 'bridge archive is missing VERSION.' 1
+  [ -f "$root/manifest.json" ] || fail 'bridge archive is missing manifest.json.' 1
+  [ -f "$root/SHA256SUMS" ] || fail 'bridge archive is missing SHA256SUMS.' 1
+  [ -x "$root/bin/hallpass-bridge" ] || fail 'bridge archive is missing executable bin/hallpass-bridge.' 1
+  [ -d "$root/lib" ] || fail 'bridge archive is missing lib/.' 1
+  # No -quit: BSD/macOS find lacks it.
+  if ! find "$root/lib" -maxdepth 1 -type f -name '*.jar' 2>/dev/null | grep -q .; then
+    fail 'bridge archive contains no runtime jars.' 1
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$root" && sha256sum --check SHA256SUMS)
+  elif command -v shasum >/dev/null 2>&1; then
+    (cd "$root" && shasum -a 256 -c SHA256SUMS)
+  else
+    fail 'sha256sum or shasum is required to verify the bridge archive.' 127
+  fi
+}
+
+verify_archive() {
+  verify_archive_at "$archive_root"
+}
+
+validate_prefix() {
+  prefix=$1
+  [ -n "$prefix" ] || fail 'HOME or XDG_DATA_HOME must be set.'
+  case "$prefix" in
+    /*) ;;
+    *) fail 'prefix must be an absolute path.' ;;
+  esac
+  case "$prefix" in
+    *'/../'*|*/..|*'/./'*|*/.) fail 'prefix must not contain dot path segments.' ;;
+    /|/home|/tmp|/usr|/var|/etc|/opt|/root|/mnt|/bin|/sbin|/lib|/lib64|/run|/proc|/sys|/dev)
+      fail 'prefix must name a dedicated Hallpass data directory.' ;;
+  esac
+  [ "$prefix" != "${HOME:-}" ] || fail 'prefix must be a dedicated Hallpass data directory.'
+
+  # Check every existing lexical component before mkdir, copy, or removal.
+  probe=$prefix
+  while [ "$probe" != / ]; do
+    [ ! -L "$probe" ] || fail 'prefix and its existing parent directories must not be symlinks.'
+    parent=${probe%/*}
+    [ -n "$parent" ] || parent=/
+    [ "$parent" != "$probe" ] || break
+    probe=$parent
+  done
+}
+
+check_prefix_permissions() {
+  directory=$1
+  [ -d "$directory" ] || fail 'prefix directory does not exist.' 1
+  command -v stat >/dev/null 2>&1 || fail 'stat is required for safe bridge installation.' 127
+  command -v id >/dev/null 2>&1 || fail 'id is required for safe bridge installation.' 127
+  # GNU stat first (`-c`); BSD/macOS stat rejects `-c` and takes `-f`. GNU `stat -f` means
+  # filesystem status, so the order matters and the result is checked against the expected shape.
+  ownership=$(stat -c '%u %a' "$directory" 2>/dev/null) \
+    || ownership=$(stat -f '%u %Lp' "$directory" 2>/dev/null) \
+    || fail 'cannot inspect prefix ownership or permissions.' 1
+  case "$ownership" in
+    [0-9]*' '[0-7]*) ;;
+    *) fail 'cannot inspect prefix ownership or permissions.' 1 ;;
+  esac
+  owner=${ownership%% *}
+  mode=${ownership#* }
+  [ "$owner" = "$(id -u)" ] || fail 'prefix must be owned by the current user.' 1
+  case "$mode" in ''|*[!0-7]*) fail 'cannot inspect prefix permissions.' 1 ;; esac
+  if [ $((0$mode & 022)) -ne 0 ]; then
+    fail 'prefix must not be group- or other-writable.' 1
+  fi
+}
+
+parse_prefix() {
+  prefix=$default_prefix
+  if [ "$#" -ge 2 ] && [ "$1" = '--prefix' ]; then
+    [ -n "$2" ] || fail '--prefix requires a directory.'
+    prefix=$2
+    shift 2
+  fi
+  [ "$#" -eq 0 ] || fail 'unexpected arguments.'
+  validate_prefix "$prefix"
+}
+
+install_bridge() {
+  verify_archive >/dev/null
+  prefix=$1
+  target="$prefix/bridge"
+  [ ! -e "$target" ] && [ ! -L "$target" ] || fail "install destination already exists: $target" 1
+  mkdir -p -m 700 "$prefix"
+  check_prefix_permissions "$prefix"
+  chmod 700 "$prefix"
+  temporary="$prefix/.bridge-install-$$"
+  [ ! -e "$temporary" ] && [ ! -L "$temporary" ] || fail 'temporary install path already exists.' 1
+  trap 'rm -rf -- "$temporary"' EXIT HUP INT TERM
+  mkdir "$temporary"
+  cp -R "$archive_root/." "$temporary/"
+  printf '%s\n' 'hallpass-bridge-install-v1' > "$temporary/.hallpass-install"
+  if ! mv "$temporary" "$target"; then
+    fail 'could not place the bridge at the requested prefix.' 1
+  fi
+  trap - EXIT HUP INT TERM
+  printf 'Bridge installed at %s\n' "$target"
+  printf 'Launcher: %s/bin/hallpass-bridge\n' "$target"
+}
+
+# assert_marked_install DIR VERB: DIR is a real directory carrying this tool's ownership marker.
+assert_marked_install() {
+  target=$1
+  verb=$2
+  [ ! -L "$target" ] || fail "refusing to $verb symlinked install target: $target" 1
+  [ -d "$target" ] || fail "owned bridge installation not found: $target" 1
+  [ -f "$target/.hallpass-install" ] && [ ! -L "$target/.hallpass-install" ] || fail "refusing to $verb unmarked directory: $target" 1
+  marker=$(cat "$target/.hallpass-install" 2>/dev/null || true)
+  [ "$marker" = 'hallpass-bridge-install-v1' ] || fail "refusing to $verb unrecognized directory: $target" 1
+}
+
+# Refuses unless $1 is a bridge directory this tool installed and it still verifies.
+assert_owned_install() {
+  assert_marked_install "$1" "${2:-remove}"
+  verify_archive_at "$1" >/dev/null || fail 'installed bridge verification failed.' 1
+}
+
+# remove_owned_tree DIR check|remove|remove-known
+# Compares DIR with its manifest: every listed file, the marker, manifest.json and SHA256SUMS, and
+# nothing else, apart from Python bytecode caches in bin/__pycache__ (regular *.pyc files only, which an
+# older launcher could leave behind). `check` stops there; `remove` then deletes exactly those files and
+# the directories. `remove-known` skips the comparison: it deletes every recognized file that exists and
+# leaves anything else, exiting 3 if something was left.
+remove_owned_tree() {
+  command -v python3 >/dev/null 2>&1 || fail 'python3 is required for safe bridge cleanup.' 127
+  python3 - "$1" "$2" <<'PY'
+import json
+import os
+from pathlib import Path, PurePosixPath
+import sys
+
+root = Path(sys.argv[1])
+mode = sys.argv[2]
+marker = ".hallpass-install"
+
+def refuse(message):
+    print(f"hallpass: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+# Reject symlinks anywhere in the path to the install root, including the root.
+for path in (root, *root.parents):
+    if path.is_symlink():
+        refuse("install path contains a symlink; refusing cleanup.")
+
+try:
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    records = manifest["files"]
+    expected = set()
+    for record in records:
+        name = record["path"]
+        path = PurePosixPath(name)
+        if not name or path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
+            refuse("manifest contains an unsafe path; refusing cleanup.")
+        expected.add(path.as_posix())
+    if not expected:
+        refuse("manifest contains no owned files; refusing cleanup.")
+except (OSError, ValueError, KeyError, TypeError) as error:
+    refuse(f"cannot read the installed manifest ({type(error).__name__}); refusing cleanup.")
+
+expected.update({marker, "manifest.json", "SHA256SUMS"})
+expected_dirs = {"."}
+for name in expected:
+    parent = PurePosixPath(name).parent
+    while parent.as_posix() not in (".", ""):
+        expected_dirs.add(parent.as_posix())
+        parent = parent.parent
+
+actual_files = set()
+actual_dirs = {"."}
+for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
+    current_path = Path(current)
+    relative = current_path.relative_to(root).as_posix()
+    if relative != ".":
+        actual_dirs.add(relative)
+    for name in list(dirs):
+        path = current_path / name
+        if path.is_symlink():
+            if mode == "remove-known":
+                dirs.remove(name)
+                continue
+            refuse("install contains a symlink; refusing cleanup.")
+        rel = path.relative_to(root).as_posix()
+        actual_dirs.add(rel)
+    for name in files:
+        path = current_path / name
+        if path.is_symlink() or not path.is_file():
+            if mode == "remove-known":
+                continue
+            refuse("install contains a non-regular file; refusing cleanup.")
+        actual_files.add(path.relative_to(root).as_posix())
+
+# Bytecode caches are generated, not installed: bin/__pycache__/*.pyc and nothing else is tolerated.
+cache_dir = "bin/__pycache__"
+generated = {
+    name for name in actual_files
+    if PurePosixPath(name).parent.as_posix() == cache_dir and name.endswith(".pyc")
+}
+if cache_dir in actual_dirs and not any(
+    name.startswith(cache_dir + "/") and name not in generated for name in actual_files | actual_dirs
+):
+    actual_files -= generated
+    actual_dirs.discard(cache_dir)
+else:
+    generated = set()
+
+def remove_generated():
+    for name in sorted(generated):
+        (root / PurePosixPath(name)).unlink()
+    if generated:
+        (root / cache_dir).rmdir()
+
+if mode == "remove-known":
+    remove_generated()
+    for name in sorted(expected & actual_files, key=lambda item: (item.count("/"), item), reverse=True):
+        (root / PurePosixPath(name)).unlink()
+    for name in sorted(expected_dirs - {"."}, key=lambda item: (item.count("/"), item), reverse=True):
+        try:
+            (root / PurePosixPath(name)).rmdir()
+        except OSError:
+            pass
+    try:
+        root.rmdir()
+    except OSError:
+        raise SystemExit(3)
+    raise SystemExit(0)
+
+if actual_files != expected or actual_dirs != expected_dirs:
+    refuse("install contains missing or unexpected paths; refusing cleanup.")
+if mode == "check":
+    raise SystemExit(0)
+
+# Remove only manifest-listed package files, the ownership marker, and generated bytecode caches.
+remove_generated()
+for name in sorted(expected, key=lambda item: (item.count("/"), item), reverse=True):
+    (root / PurePosixPath(name)).unlink()
+for name in sorted(expected_dirs - {"."}, key=lambda item: (item.count("/"), item), reverse=True):
+    (root / PurePosixPath(name)).rmdir()
+root.rmdir()
+PY
+}
+
+uninstall_bridge() {
+  prefix=$1
+  check_prefix_permissions "$prefix"
+  target="$prefix/bridge"
+  assert_owned_install "$target" remove
+  remove_owned_tree "$target" remove
+  printf 'Removed Hallpass bridge installation at %s\n' "$target"
+}
+
+# Succeeds only for an install this tool made that is complete and unmodified: the ownership marker, every
+# file matching the manifest checksums, and no other files.
+check_bridge() {
+  prefix=$1
+  check_prefix_permissions "$prefix"
+  target="$prefix/bridge"
+  assert_owned_install "$target" check
+  remove_owned_tree "$target" check
+  printf 'Bridge at %s is intact (%s).\n' "$target" "$(cat "$target/VERSION")"
+}
+
+# Replaces an existing installation with the archive this command runs from.
+#   upgrade  The old install must be one this tool made, verify, and match its manifest exactly (a dry run
+#            of the cleanup below), so an install that cannot be cleaned up is refused before anything moves.
+#   repair   The old install need only carry this tool's ownership marker: it may be damaged, modified, or hold
+#            stale files, which is what repair is for. Nothing outside PREFIX/bridge is touched, and the old
+#            copy is cleaned up leniently, never deleting a file it does not recognize.
+#   1. The new archive is copied beside it, in the same directory so the renames stay on one
+#      filesystem, and verified there.
+#   2. Two renames swap them: bridge -> .bridge-old, then the new copy -> bridge. Between them there is
+#      a moment with no bridge/ directory, so a launcher started in that instant fails and can be
+#      retried. If the second rename fails the first is undone.
+#   3. The old copy is removed with the same manifest-checked cleanup `uninstall` uses (upgrade), or with
+#      the lenient one (repair), which keeps the directory, and says where, if anything unrecognized was in it.
+replace_bridge() {
+  prefix=$1
+  replace_mode=$2
+  verify_archive >/dev/null
+  check_prefix_permissions "$prefix"
+  target="$prefix/bridge"
+  if [ "$replace_mode" = upgrade ]; then
+    assert_owned_install "$target" replace
+  else
+    assert_marked_install "$target" replace
+  fi
+  installed_physical=$(CDPATH= cd -- "$target" && pwd -P)
+  archive_physical=$(CDPATH= cd -- "$archive_root" && pwd -P)
+  [ "$installed_physical" != "$archive_physical" ] \
+    || fail "run $replace_mode from the new archive, not from the installation it would replace." 1
+  if [ "$replace_mode" = upgrade ]; then remove_owned_tree "$target" check; fi
+
+  staged="$prefix/.bridge-upgrade-$$"
+  previous="$prefix/.bridge-old-$$"
+  [ ! -e "$staged" ] && [ ! -L "$staged" ] && [ ! -e "$previous" ] && [ ! -L "$previous" ] \
+    || fail 'temporary upgrade path already exists.' 1
+  upgrade_cleanup() {
+    rm -rf -- "$staged"
+    # Interrupted between the renames: put the old install back.
+    if [ -d "$previous" ] && [ ! -e "$target" ] && [ ! -L "$target" ]; then
+      mv "$previous" "$target"
+    fi
+  }
+  trap upgrade_cleanup EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  mkdir "$staged"
+  cp -R "$archive_root/." "$staged/"
+  # Bytecode caches are never part of a package.
+  find "$staged" -type d -name __pycache__ -prune -exec rm -rf -- {} + 2>/dev/null || true
+  printf '%s\n' 'hallpass-bridge-install-v1' > "$staged/.hallpass-install"
+  verify_archive_at "$staged" >/dev/null || fail 'staged bridge failed verification; the existing install was not touched.' 1
+
+  old_version=$(cat "$target/VERSION" 2>/dev/null || printf unknown)
+  mv "$target" "$previous" || fail 'could not move the existing install aside; it was not changed.' 1
+  if ! mv "$staged" "$target"; then
+    mv "$previous" "$target" || true
+    fail 'could not place the new bridge; the existing install was restored.' 1
+  fi
+  trap - EXIT HUP INT TERM
+  if [ "$replace_mode" = upgrade ]; then
+    printf 'Bridge upgraded at %s (%s -> %s)\n' "$target" "$old_version" "$(cat "$target/VERSION")"
+    if ! remove_owned_tree "$previous" remove; then
+      printf 'hallpass: warning: the new bridge is active, but the old copy could not be removed: %s\n' "$previous" >&2
+      printf 'hallpass: it holds no credentials; delete it manually.\n' >&2
+    fi
+  else
+    printf 'Bridge repaired at %s (%s -> %s)\n' "$target" "$old_version" "$(cat "$target/VERSION")"
+    if ! remove_owned_tree "$previous" remove-known; then
+      kept="$prefix/bridge.replaced-$(date +%Y%m%d%H%M%S)"
+      if [ ! -e "$kept" ] && mv "$previous" "$kept" 2>/dev/null; then previous=$kept; fi
+      printf 'hallpass: the new bridge is active. Files that are not part of the package were left in %s; review or delete them.\n' "$previous" >&2
+    fi
+  fi
+}
+
+case "${1:-}" in
+  setup|remove|connect)
+    action=$1
+    shift
+    command -v python3 >/dev/null 2>&1 || fail 'python3 is required for client registration.' 127
+    [ -f "$script_dir/hallpass_client_config.py" ] || fail 'client registration helper is missing.' 1
+    exec python3 -B "$script_dir/hallpass_client_config.py" "$action" "$@"
+    ;;
+  doctor)
+    shift
+    [ -x "$script_dir/hallpass-doctor" ] || fail 'doctor helper is missing.' 1
+    exec "$script_dir/hallpass-doctor" "$@"
+    ;;
+  credential)
+    [ "${2:-}" = import ] || { usage >&2; exit 2; }
+    shift 2
+    [ -x "$script_dir/hallpass-credential-import" ] || fail 'credential import helper is missing.' 1
+    exec "$script_dir/hallpass-credential-import" "$@"
+    ;;
+  version)
+    [ "$#" -eq 1 ] || fail 'version takes no arguments.'
+    [ -f "$archive_root/VERSION" ] || fail 'bridge archive is missing VERSION.' 1
+    cat "$archive_root/VERSION"
+    ;;
+  verify)
+    [ "$#" -eq 1 ] || fail 'verify takes no arguments.'
+    verify_archive
+    ;;
+  bridge)
+    [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+    action=$2
+    shift 2
+    parse_prefix "$@"
+    case "$action" in
+      install) install_bridge "$prefix" ;;
+      upgrade) replace_bridge "$prefix" upgrade ;;
+      repair) replace_bridge "$prefix" repair ;;
+      check) check_bridge "$prefix" ;;
+      uninstall|cleanup) uninstall_bridge "$prefix" ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    ;;
+  -h|--help|help|'') usage ;;
+  *) usage >&2; exit 2 ;;
+esac

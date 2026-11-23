@@ -1,0 +1,59 @@
+# Example environment overlay. Copy it per environment and replace every
+# example.com value, the image registry and tags, and the ingress class.
+#
+# Secrets are not in this repository. Create them with your secret manager
+# (for example External Secrets Operator) before applying:
+#   hallpass-api          db-password, agent-credential-keys, oidc-client-secret, slack-client-secret
+#   hallpass-github       github-app-private-key, github-client-secret (optional; only when GitHub is enabled)
+#   hallpass-linear       linear-client-secret (optional; only when Linear is enabled)
+#   hallpass-notion       notion-client-secret (optional; only when Notion is enabled)
+#   hallpass-google       google-drive-client-secret (optional; only when Google Drive is enabled)
+#   hallpass-hubspot      hubspot-client-secret (optional; only when HubSpot is enabled)
+#   hallpass-vault-token  token   (or replace the volume with a Vault Agent / CSI token sink)
+#   hallpass-migrate      db-owner-password
+#   hallpass-admin-tls, hallpass-agents-tls   TLS certificates for the ingress hosts
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: hallpass
+resources:
+  - namespace.yaml
+  - ../../base
+  - ui.yaml
+  - ingress.yaml
+images:
+  - name: hallpass-api
+    newName: registry.example.com/hallpass/hallpass-api
+    newTag: "0.1.0"
+  - name: hallpass-migrate
+    newName: registry.example.com/hallpass/hallpass-migrate
+    newTag: "0.1.0"
+  - name: hallpass-admin-ui
+    newName: registry.example.com/hallpass/hallpass-admin-ui
+    newTag: "0.1.0"
+patches:
+  # Jobs are immutable: name each release's migration.
+  - target:
+      kind: Job
+      name: hallpass-migrate
+    patch: |-
+      - op: replace
+        path: /metadata/name
+        value: hallpass-migrate-0-1-0
+  - target:
+      kind: ConfigMap
+      name: hallpass-api
+    patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: hallpass-api
+      data:
+        HALLPASS_DB_URL: jdbc:postgresql://hallpass-db.example.internal:5432/authai?sslmode=verify-full
+        HALLPASS_ADMIN_ORIGIN: https://admin.hallpass.example.com
+        HALLPASS_AGENT_PUBLIC_URL: https://agents.hallpass.example.com
+        HALLPASS_OIDC_ISSUER: https://idp.example.com
+        HALLPASS_OIDC_CLIENT_ID: hallpass-admin
+        HALLPASS_SLACK_CLIENT_ID: "1234567890.1234567890"
+        HALLPASS_SLACK_REDIRECT_URI: https://admin.hallpass.example.com/api/oauth/slack/callback
+        HALLPASS_VAULT_ADDR: https://vault.example.internal:8200
+        OTEL_EXPORTER_OTLP_ENDPOINT: https://otel-collector.example.internal:4318

@@ -1,0 +1,8 @@
+# Keep sbt bootstrap, global, and Ivy state inside the workspace.
+# This avoids requiring Codex sandbox access to the user-global sbt cache.
+--no-share
+--server
+-Dsbt.coursier.home=project/.coursier
+# OneDrive is a Windows-mounted filesystem in WSL and cannot host Unix sockets.
+# Keep only sbt 2's client/server IPC state on the Linux-side temp filesystem.
+-Dsbt.server.dir=/tmp/hallpass-sbt-server

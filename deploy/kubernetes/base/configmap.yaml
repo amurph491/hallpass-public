@@ -1,0 +1,85 @@
+# Non-secret production configuration. Every secret is a mounted file (see
+# deployment.yaml); none is an environment variable. Values marked REPLACE are
+# set by the overlay.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hallpass-api
+data:
+  HALLPASS_ENV: production
+  # PostgreSQL: the runtime role, never the schema owner. Migrations run in the Job.
+  HALLPASS_DB_URL: REPLACE-jdbc:postgresql://postgres.example.internal:5432/authai?sslmode=verify-full
+  HALLPASS_DB_USER: authai_app
+  HALLPASS_DB_PASSWORD_FILE: /run/secrets/hallpass/db-password
+  HALLPASS_DB_MIGRATIONS: external
+  HALLPASS_TENANT_GATE: postgres
+  # Listeners. The agent listener is reached only through the ingress.
+  HALLPASS_AGENT_HTTP_BIND_HOST: "0.0.0.0"
+  HALLPASS_AGENT_HTTP_PORT: "8081"
+  # The https URL client machines use to reach the agent API (the agents ingress host). Required in production;
+  # the admin UI shows it in setup commands.
+  HALLPASS_AGENT_PUBLIC_URL: REPLACE-https://agents.example.com
+  HALLPASS_AGENT_CREDENTIAL_KEYS_FILE: /run/secrets/hallpass/agent-credential-keys
+  # Proxies in front of the agent listener that append X-Forwarded-For. The
+  # example ingress is one. Throttling and the rejection audit use this.
+  HALLPASS_TRUSTED_PROXY_COUNT: "1"
+  # Browser login (OIDC). The admin origin must be https in production.
+  HALLPASS_ADMIN_ORIGIN: REPLACE-https://admin.example.com
+  HALLPASS_OIDC_ISSUER: REPLACE-https://idp.example.com
+  HALLPASS_OIDC_CLIENT_ID: REPLACE-hallpass-admin
+  HALLPASS_OIDC_CLIENT_SECRET_FILE: /run/secrets/hallpass/oidc-client-secret
+  # Slack. Its search endpoint is never overridden in production.
+  HALLPASS_SLACK_CLIENT_ID: REPLACE-slack-client-id
+  HALLPASS_SLACK_CLIENT_SECRET_FILE: /run/secrets/hallpass/slack-client-secret
+  HALLPASS_SLACK_REDIRECT_URI: REPLACE-https://admin.example.com/api/oauth/slack/callback
+  # GitHub App (off while HALLPASS_GITHUB_APP_ID is empty). When enabled, set the four values below in the overlay and
+  # create the hallpass-github Secret with github-app-private-key and github-client-secret. The endpoint overrides
+  # (HALLPASS_GITHUB_API_URL, HALLPASS_GITHUB_WEB_URL) are never set in production.
+  HALLPASS_GITHUB_APP_ID: ""
+  HALLPASS_GITHUB_CLIENT_ID: ""
+  HALLPASS_GITHUB_APP_SLUG: ""
+  HALLPASS_GITHUB_REDIRECT_URI: ""
+  HALLPASS_GITHUB_PRIVATE_KEY_FILE: /run/secrets/hallpass-github/github-app-private-key
+  HALLPASS_GITHUB_CLIENT_SECRET_FILE: /run/secrets/hallpass-github/github-client-secret
+  # Linear OAuth application (off while HALLPASS_LINEAR_CLIENT_ID is empty). When enabled, set the two values below in
+  # the overlay and create the hallpass-linear Secret with linear-client-secret. The endpoint overrides
+  # (HALLPASS_LINEAR_AUTHORIZE_URL, HALLPASS_LINEAR_EXCHANGE_URL, HALLPASS_LINEAR_GRAPHQL_URL) are never set in production.
+  HALLPASS_LINEAR_CLIENT_ID: ""
+  HALLPASS_LINEAR_REDIRECT_URI: ""
+  HALLPASS_LINEAR_CLIENT_SECRET_FILE: /run/secrets/hallpass-linear/linear-client-secret
+  # Notion public integration (off while HALLPASS_NOTION_CLIENT_ID is empty). When enabled, set the two values below in
+  # the overlay and create the hallpass-notion Secret with notion-client-secret. The endpoint overrides
+  # (HALLPASS_NOTION_AUTHORIZE_URL, HALLPASS_NOTION_API_URL) are never set in production.
+  HALLPASS_NOTION_CLIENT_ID: ""
+  HALLPASS_NOTION_REDIRECT_URI: ""
+  HALLPASS_NOTION_CLIENT_SECRET_FILE: /run/secrets/hallpass-notion/notion-client-secret
+  # Google Drive OAuth web client (off while HALLPASS_GOOGLE_DRIVE_CLIENT_ID is empty). When enabled, set the redirect URI
+  # (https) in the overlay, optionally HALLPASS_GOOGLE_PICKER_API_KEY and HALLPASS_GOOGLE_PICKER_APP_ID (browser-visible, not
+  # secret), and create the hallpass-google Secret with google-drive-client-secret. The endpoint overrides
+  # (HALLPASS_GOOGLE_AUTHORIZE_URL, HALLPASS_GOOGLE_EXCHANGE_URL, HALLPASS_GOOGLE_USERINFO_URL, HALLPASS_GOOGLE_DRIVE_API_URL)
+  # are never set in production.
+  HALLPASS_GOOGLE_DRIVE_CLIENT_ID: ""
+  HALLPASS_GOOGLE_DRIVE_REDIRECT_URI: ""
+  HALLPASS_GOOGLE_DRIVE_CLIENT_SECRET_FILE: /run/secrets/hallpass-google/google-drive-client-secret
+  HALLPASS_GOOGLE_PICKER_API_KEY: ""
+  HALLPASS_GOOGLE_PICKER_APP_ID: ""
+  # Gmail send (off). "true" adds the gmail.send scope (sensitive) and offers each account mailbox; the owner policy requires
+  # approval for every send. Any value other than true/false refuses startup.
+  HALLPASS_GOOGLE_GMAIL_SEND_ENABLED: "false"
+  # HubSpot OAuth app (off while HALLPASS_HUBSPOT_CLIENT_ID is empty). When enabled, set the redirect URI (https) in the
+  # overlay and create the hallpass-hubspot Secret with hubspot-client-secret. The endpoint overrides
+  # (HALLPASS_HUBSPOT_AUTHORIZE_URL, HALLPASS_HUBSPOT_API_URL) are never set in production.
+  HALLPASS_HUBSPOT_CLIENT_ID: ""
+  HALLPASS_HUBSPOT_REDIRECT_URI: ""
+  HALLPASS_HUBSPOT_CLIENT_SECRET_FILE: /run/secrets/hallpass-hubspot/hubspot-client-secret
+  # Provider secrets: envelope encryption with Vault Transit (derived aes256-gcm96 key).
+  HALLPASS_SECRET_STORE: vault-transit
+  HALLPASS_VAULT_ADDR: REPLACE-https://vault.example.internal:8200
+  HALLPASS_VAULT_TRANSIT_MOUNT: transit
+  HALLPASS_VAULT_TRANSIT_KEY: hallpass-provider-secrets
+  # Written by a Vault Agent sidecar or CSI driver; re-read on every call, so it can rotate.
+  HALLPASS_VAULT_TOKEN_FILE: /run/secrets/vault/token
+  # Telemetry (standard OTEL_* variables). Production requires https.
+  OTEL_EXPORTER_OTLP_ENDPOINT: REPLACE-https://otel-collector.example.internal:4318
+  OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+  OTEL_SERVICE_NAME: hallpass-api

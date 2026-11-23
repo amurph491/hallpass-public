@@ -1,0 +1,55 @@
+# Default deny for the API pods, then only what they need. The overlay narrows
+# the ingress source to the ingress controller's namespace and, where the CNI
+# supports it, egress to the actual database, Vault, and collector addresses.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hallpass-api
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: hallpass-api
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              hallpass.run/ingress: "true"
+      ports:
+        - port: 8080
+        - port: 8081
+  egress:
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # PostgreSQL, Vault, and the OTLP collector
+    - ports:
+        - port: 5432
+        - port: 8200
+        - port: 4317
+        - port: 4318
+    # HTTPS to Slack and the identity provider
+    - ports:
+        - port: 443
+---
+# The migration job needs only DNS and PostgreSQL.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hallpass-migrate
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: hallpass-migrate
+  policyTypes: ["Ingress", "Egress"]
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - ports:
+        - port: 5432

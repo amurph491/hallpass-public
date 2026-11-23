@@ -1,0 +1,191 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hallpass-api
+spec:
+  # At least two instances: the PostgreSQL tenant gate and durable sessions make any instance interchangeable.
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hallpass-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hallpass-api
+    spec:
+      serviceAccountName: hallpass-api
+      automountServiceAccountToken: false
+      # Drain (10 s) + in-flight wait (35 s) + margin; see HttpRuntime. A provider call and its audit record are never
+      # cut short by shutdown.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: hallpass-api
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: hallpass-api
+      containers:
+        - name: api
+          image: hallpass-api
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: management
+              containerPort: 8080
+            - name: agent
+              containerPort: 8081
+          envFrom:
+            - configMapRef:
+                name: hallpass-api
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 250m
+              memory: 768Mi
+            limits:
+              memory: 1Gi
+          # Readiness fails while draining, when PostgreSQL or the gate pool is unhealthy, or when the schema is older
+          # than this release needs.
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: management
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: management
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: management
+            periodSeconds: 2
+            failureThreshold: 60
+          volumeMounts:
+            - name: hallpass-secrets
+              mountPath: /run/secrets/hallpass
+              readOnly: true
+            - name: hallpass-github
+              mountPath: /run/secrets/hallpass-github
+              readOnly: true
+            - name: hallpass-linear
+              mountPath: /run/secrets/hallpass-linear
+              readOnly: true
+            - name: hallpass-notion
+              mountPath: /run/secrets/hallpass-notion
+              readOnly: true
+            - name: hallpass-google
+              mountPath: /run/secrets/hallpass-google
+              readOnly: true
+            - name: hallpass-hubspot
+              mountPath: /run/secrets/hallpass-hubspot
+              readOnly: true
+            - name: vault-token
+              mountPath: /run/secrets/vault
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: hallpass-secrets
+          secret:
+            secretName: hallpass-api
+            defaultMode: 0400
+            items:
+              - key: db-password
+                path: db-password
+              - key: agent-credential-keys
+                path: agent-credential-keys
+              - key: oidc-client-secret
+                path: oidc-client-secret
+              - key: slack-client-secret
+                path: slack-client-secret
+        # The GitHub App's private key and client secret, in their own Secret. It is optional so a deployment without
+        # GitHub (HALLPASS_GITHUB_APP_ID empty) needs no placeholder keys; with GitHub enabled, a missing file refuses
+        # startup.
+        - name: hallpass-github
+          secret:
+            secretName: hallpass-github
+            optional: true
+            defaultMode: 0400
+            items:
+              - key: github-app-private-key
+                path: github-app-private-key
+              - key: github-client-secret
+                path: github-client-secret
+        # The Linear OAuth client secret, in its own optional Secret (Linear is off while HALLPASS_LINEAR_CLIENT_ID is
+        # empty); with Linear enabled, a missing file refuses startup.
+        - name: hallpass-linear
+          secret:
+            secretName: hallpass-linear
+            optional: true
+            defaultMode: 0400
+            items:
+              - key: linear-client-secret
+                path: linear-client-secret
+        # The Notion OAuth client secret, in its own optional Secret (Notion is off while HALLPASS_NOTION_CLIENT_ID is
+        # empty); with Notion enabled, a missing file refuses startup.
+        - name: hallpass-notion
+          secret:
+            secretName: hallpass-notion
+            optional: true
+            defaultMode: 0400
+            items:
+              - key: notion-client-secret
+                path: notion-client-secret
+        # The Google Drive OAuth client secret, in its own optional Secret (Google Drive is off while
+        # HALLPASS_GOOGLE_DRIVE_CLIENT_ID is empty); with Google Drive enabled, a missing file refuses startup.
+        - name: hallpass-google
+          secret:
+            secretName: hallpass-google
+            optional: true
+            defaultMode: 0400
+            items:
+              - key: google-drive-client-secret
+                path: google-drive-client-secret
+        # The HubSpot OAuth client secret, in its own optional Secret (HubSpot is off while
+        # HALLPASS_HUBSPOT_CLIENT_ID is empty); with HubSpot enabled, a missing file refuses startup.
+        - name: hallpass-hubspot
+          secret:
+            secretName: hallpass-hubspot
+            optional: true
+            defaultMode: 0400
+            items:
+              - key: hubspot-client-secret
+                path: hubspot-client-secret
+        # Replace with the Vault Agent sidecar's or CSI driver's token sink in the overlay; a static Secret works but
+        # cannot rotate the token.
+        - name: vault-token
+          secret:
+            secretName: hallpass-vault-token
+            defaultMode: 0400
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

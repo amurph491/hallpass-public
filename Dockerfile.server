@@ -1,0 +1,42 @@
+# Production images for the Hallpass server. One build, two targets that share
+# every layer, so the migration job and the API always run the same code:
+#
+#   docker build -f Dockerfile.server --target api     -t hallpass-api:<version> .
+#   docker build -f Dockerfile.server --target migrate -t hallpass-migrate:<version> .
+#
+# The operator jobs (HallpassProvisionMain, HallpassBreakGlassMain,
+# HallpassRewrapSecretsMain) run from the `api` image with an overridden command.
+#
+# Both images run as a fixed numeric non-root user (so `runAsNonRoot` can be
+# verified), own none of their application files, need no writable root
+# filesystem, and have no shell entrypoint. All configuration and secrets come
+# from the environment and mounted files at runtime; nothing secret is baked in.
+
+FROM sbtscala/scala-sbt:eclipse-temurin-21.0.7_6_1.10.11_3.7.0 AS build
+
+WORKDIR /app
+COPY . .
+RUN sbt --error 'gateway / stageRuntimeClasspath'
+
+FROM eclipse-temurin:21-jre AS runtime
+
+RUN groupadd --system --gid 10001 hallpass \
+ && useradd --system --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hallpass
+
+# Root-owned (default 0644 files, 0755 directories), so the runtime user can read but never modify them.
+COPY --from=build --chown=0:0 /app/.docker-stage/gateway/lib /opt/hallpass/lib
+
+# Size the heap from the container limit, and exit on OOM so the platform restarts a clean process rather than
+# serving from a degraded one. /tmp is expected to be an emptyDir when the root filesystem is read-only.
+ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError -Djava.io.tmpdir=/tmp"
+
+USER 10001:10001
+WORKDIR /opt/hallpass
+
+FROM runtime AS migrate
+ENTRYPOINT ["java", "-cp", "/opt/hallpass/lib/*", "run.hallpass.gateway.HallpassMigrateMain"]
+
+FROM runtime AS api
+# 8080: management (browser admin) listener. 8081: agent listener.
+EXPOSE 8080 8081
+ENTRYPOINT ["java", "-cp", "/opt/hallpass/lib/*", "run.hallpass.gateway.HallpassDemoApiMain"]

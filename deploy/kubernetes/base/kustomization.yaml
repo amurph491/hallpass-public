@@ -1,0 +1,22 @@
+# Hallpass API on Kubernetes. This base is
+# production-shaped and environment-neutral. An overlay supplies the namespace,
+# image tags, endpoints, ingress, and secrets (see overlays/example).
+#
+# Rollout order for a release:
+#   1. apply and wait for the migration Job (it refuses unsafe role setups);
+#   2. apply the Deployment; readiness requires the schema this release needs.
+# Migrations are expand/contract, so the old release keeps serving during 1.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: hallpass
+    includeSelectors: false
+resources:
+  - serviceaccount.yaml
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+  - poddisruptionbudget.yaml
+  - networkpolicy.yaml
+  - migration-job.yaml

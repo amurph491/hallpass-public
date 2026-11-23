@@ -1,0 +1,147 @@
+# Hallpass alerting rules (Prometheus rule format; also loadable by Mimir, Grafana
+# Alerting, and managed Prometheus services).
+#
+# Metrics are exported over OTLP. Names below use the standard OTLP-to-Prometheus
+# translation: dots become underscores, counters gain `_total`, and histograms
+# with unit `s` gain `_seconds`. TelemetryAlertRulesSuite checks that every
+# metric referenced here is one the server defines.
+#
+# Thresholds are starting points for a first deployment; tune them per
+# environment. No rule reads request data: every label is a fixed vocabulary.
+groups:
+  - name: hallpass-authorization
+    rules:
+      - alert: HallpassDeniedCallsSpike
+        expr: sum(rate(hallpass_authorization_decisions_total{hallpass_outcome="denied",hallpass_source="agent_call"}[10m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Agent calls are being denied at an unusual rate.
+          description: >-
+            More than one denied agent call per second for 10 minutes. Check for a
+            revoked delegation still in use, an unmapped tool, or a misbehaving agent.
+            Break down by hallpass_reason.
+
+      - alert: HallpassAuthorityLoadFailures
+        expr: sum(increase(hallpass_authority_load_failures_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Authority snapshots cannot be loaded.
+          description: >-
+            Agent calls fail closed (503) while authority cannot be read from
+            PostgreSQL. Check database health and the runtime role's grants.
+
+  - name: hallpass-execution
+    rules:
+      - alert: HallpassExecutionOutcomeUnknown
+        expr: sum(increase(hallpass_execution_events_total{hallpass_outcome="completion_unknown"}[15m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: A provider call may have completed without durable evidence.
+          description: >-
+            An execution was dispatched but its completion could not be recorded.
+            It is never retried automatically. Reconcile the provider side using the
+            request's correlation ID in the execution history.
+
+      - alert: HallpassConnectionUnavailable
+        expr: sum(increase(hallpass_execution_events_total{hallpass_outcome="connection_unavailable"}[10m])) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Executions are failing because provider connections are unavailable.
+          description: >-
+            Includes key-service (Vault Transit) outages. Correlate with
+            HallpassSecretStoreErrors.
+
+  - name: hallpass-coordination
+    rules:
+      - alert: HallpassGateFailures
+        expr: sum(increase(hallpass_gate_failures_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: The tenant gate could not be acquired or its ownership proven.
+          description: >-
+            Executions and authority changes fail closed with COORDINATION_UNAVAILABLE.
+            Check the gate connection pool and PostgreSQL. Break down by hallpass_kind.
+
+      - alert: HallpassGateWaitHigh
+        expr: histogram_quantile(0.99, sum by (le, hallpass_gate_mode) (rate(hallpass_gate_wait_duration_seconds_bucket[5m]))) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Callers wait more than 5 s (p99) for the tenant gate.
+          description: >-
+            Long waits approach the acquisition timeout. A queued mutation blocks new
+            executions by design; persistent waits point to slow provider calls or
+            long-running mutations.
+
+  - name: hallpass-secrets-and-identity
+    rules:
+      - alert: HallpassSecretStoreErrors
+        expr: sum(increase(hallpass_secret_store_errors_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: The provider secret store is failing.
+          description: >-
+            hallpass_kind="unavailable" means the key service is unreachable or refused
+            the token; "decryption_failed" means stored ciphertext did not
+            authenticate, which should never happen and may indicate tampering.
+
+      - alert: HallpassAgentAuthenticationFailuresSpike
+        expr: sum(rate(hallpass_agent_authentication_failures_total[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Many rejected agent credentials.
+          description: >-
+            Possible credential guessing or a misconfigured bridge. Break down by
+            hallpass_reason.
+
+      - alert: HallpassAgentCredentialLocked
+        expr: sum(increase(hallpass_agent_authentication_throttled_total{hallpass_kind="selector_locked"}[10m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: An agent credential is locked after repeated wrong secrets.
+          description: >-
+            Someone presented a real credential's selector with wrong secrets at least
+            10 times in 15 minutes. The credential is refused for 15 minutes, which
+            also blocks its legitimate agent. Investigate the rejection audit
+            (directory_agent_authentication_rejections, by selector digest and client
+            address) and rotate the credential if it may be exposed.
+
+      - alert: HallpassAgentClientsThrottled
+        expr: sum(rate(hallpass_agent_authentication_throttled_total{hallpass_kind="client_address"}[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Clients are being throttled for failed agent authentication.
+          description: >-
+            Sustained failed authentications from one or more addresses. If every
+            client is throttled at once, check HALLPASS_TRUSTED_PROXY_COUNT: with too
+            few trusted proxies, the ingress's own address is throttled.
+
+  - name: hallpass-http
+    rules:
+      - alert: HallpassServerErrors
+        expr: >-
+          sum(rate(hallpass_http_requests_total{http_response_status_class="5xx"}[5m]))
+            / sum(rate(hallpass_http_requests_total[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: More than 5% of requests fail with a server error.
+          description: Break down by hallpass_listener and http_route.

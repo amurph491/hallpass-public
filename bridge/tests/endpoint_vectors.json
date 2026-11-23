@@ -1,0 +1,466 @@
+[
+  {
+    "input": "http://127.0.0.1:8081",
+    "expected": "http://127.0.0.1:8081"
+  },
+  {
+    "input": "http://127.0.0.1:8081/",
+    "expected": "http://127.0.0.1:8081"
+  },
+  {
+    "input": "http://127.0.0.1",
+    "expected": "http://127.0.0.1"
+  },
+  {
+    "input": "http://127.1.2.3:80",
+    "expected": "http://127.1.2.3"
+  },
+  {
+    "input": "http://[::1]:8081",
+    "expected": "http://[::1]:8081"
+  },
+  {
+    "input": "http://[::1]/",
+    "expected": "http://[::1]"
+  },
+  {
+    "input": "http://[0:0:0:0:0:0:0:1]:9",
+    "expected": "http://[::1]:9"
+  },
+  {
+    "input": "https://agents.hallpass.example.com/",
+    "expected": "https://agents.hallpass.example.com"
+  },
+  {
+    "input": "https://agents.hallpass.example.com",
+    "expected": "https://agents.hallpass.example.com"
+  },
+  {
+    "input": "https://agents.hallpass.example.com:8443",
+    "expected": "https://agents.hallpass.example.com:8443"
+  },
+  {
+    "input": "https://agents.hallpass.example.com:8443/",
+    "expected": "https://agents.hallpass.example.com:8443"
+  },
+  {
+    "input": "https://agents.hallpass.example.com:443",
+    "expected": "https://agents.hallpass.example.com"
+  },
+  {
+    "input": "https://a.io",
+    "expected": "https://a.io"
+  },
+  {
+    "input": "https://Agents.Example.COM",
+    "expected": "https://agents.example.com"
+  },
+  {
+    "input": "https://xn--bcher-kva.example",
+    "expected": "https://xn--bcher-kva.example"
+  },
+  {
+    "input": "https://203.0.113.10:8443",
+    "expected": "https://203.0.113.10:8443"
+  },
+  {
+    "input": "https://127.0.0.1:8081",
+    "expected": "https://127.0.0.1:8081"
+  },
+  {
+    "input": "https://[2001:db8::1]:8443",
+    "expected": "https://[2001:db8::1]:8443"
+  },
+  {
+    "input": "https://[::1]",
+    "expected": "https://[::1]"
+  },
+  {
+    "input": "",
+    "expected": null
+  },
+  {
+    "input": "agents.example.com",
+    "expected": null
+  },
+  {
+    "input": "//agents.example.com",
+    "expected": null
+  },
+  {
+    "input": "https:/agents.example.com",
+    "expected": null
+  },
+  {
+    "input": "https://",
+    "expected": null
+  },
+  {
+    "input": "ftp://agents.example.com",
+    "expected": null
+  },
+  {
+    "input": "ws://agents.example.com",
+    "expected": null
+  },
+  {
+    "input": "HTTPS://agents.example.com",
+    "expected": null
+  },
+  {
+    "input": "HTTP://127.0.0.1:8081",
+    "expected": null
+  },
+  {
+    "input": "http://localhost:8081",
+    "expected": null
+  },
+  {
+    "input": "http://localhost",
+    "expected": null
+  },
+  {
+    "input": "http://192.0.2.1:8081",
+    "expected": null
+  },
+  {
+    "input": "http://agents.example.com",
+    "expected": null
+  },
+  {
+    "input": "http://0.0.0.0:8081",
+    "expected": null
+  },
+  {
+    "input": "http://[::]:8081",
+    "expected": null
+  },
+  {
+    "input": "http://[2001:db8::1]",
+    "expected": null
+  },
+  {
+    "input": "http://127.0.0.1:8081/x",
+    "expected": null
+  },
+  {
+    "input": "http://127.0.0.1:8081?x=1",
+    "expected": null
+  },
+  {
+    "input": "http://127.0.0.1@evil.example.com",
+    "expected": null
+  },
+  {
+    "input": "http://user:pass@127.0.0.1:8081",
+    "expected": null
+  },
+  {
+    "input": "https://localhost",
+    "expected": null
+  },
+  {
+    "input": "https://intranet",
+    "expected": null
+  },
+  {
+    "input": "https://intranet:8443",
+    "expected": null
+  },
+  {
+    "input": "https://agents.example.com/api/agent",
+    "expected": null
+  },
+  {
+    "input": "https://agents.example.com/api",
+    "expected": null
+  },
+  {
+    "input": "https://agents.example.com//",
+    "expected": null
+  },
+  {
+    "input": "https://user:pass@agents.example.com",
+    "expected": null
+  },
+  {
+    "input": "https://user@agents.example.com",
+    "expected": null
+  },
+  {
+    "input": "https://agents.example.com?next=https://evil.example",
+    "expected": null
+  },
+  {
+    "input": "https://agents.example.com/?x=1",
+    "expected": null
+  },
+  {
+    "input": "https://agents.example.com#fragment",
+    "expected": null
+  },
+  {
+    "input": "https://agents.example.com\\@evil.example.com",
+    "expected": null
+  },
+  {
+    "input": "https://agents..example.com",
+    "expected": null
+  },
+  {
+    "input": "https://-agents.example.com",
+    "expected": null
+  },
+  {
+    "input": "https://agents-.example.com",
+    "expected": null
+  },
+  {
+    "input": "https://agents.example.com.",
+    "expected": null
+  },
+  {
+    "input": "https://a_b.example.com",
+    "expected": null
+  },
+  {
+    "input": "https://.example.com",
+    "expected": null
+  },
+  {
+    "input": "https://agents.example.com:0",
+    "expected": null
+  },
+  {
+    "input": "https://agents.example.com:65536",
+    "expected": null
+  },
+  {
+    "input": "https://agents.example.com:99999999",
+    "expected": null
+  },
+  {
+    "input": "https://agents.example.com:abc",
+    "expected": null
+  },
+  {
+    "input": "https://agents.example.com:-1",
+    "expected": null
+  },
+  {
+    "input": "https://1.2.3",
+    "expected": null
+  },
+  {
+    "input": "https://999.1.1.1",
+    "expected": null
+  },
+  {
+    "input": "https://example.123",
+    "expected": null
+  },
+  {
+    "input": " https://agents.example.com",
+    "expected": null
+  },
+  {
+    "input": "https://agents.example.com ",
+    "expected": null
+  },
+  {
+    "input": "https://agents.example.com\n",
+    "expected": null
+  },
+  {
+    "input": "https://agents\t.example.com",
+    "expected": null
+  },
+  {
+    "input": "https://ag\u00e9nts.example.com",
+    "expected": null
+  },
+  {
+    "input": "https://[::1",
+    "expected": null
+  },
+  {
+    "input": "https://[not-an-ip]",
+    "expected": null
+  },
+  {
+    "input": "https://[]",
+    "expected": null
+  },
+  {
+    "input": "http://127.0.0.1:80",
+    "expected": "http://127.0.0.1"
+  },
+  {
+    "input": "http://127.0.0.1:443",
+    "expected": "http://127.0.0.1:443"
+  },
+  {
+    "input": "http://[::1]:80",
+    "expected": "http://[::1]"
+  },
+  {
+    "input": "http://[0:0:0:0:0:0:0:1]",
+    "expected": "http://[::1]"
+  },
+  {
+    "input": "http://[::0001]:8081",
+    "expected": "http://[::1]:8081"
+  },
+  {
+    "input": "https://agents.example.com:80",
+    "expected": "https://agents.example.com:80"
+  },
+  {
+    "input": "https://agents.example.com:00443",
+    "expected": "https://agents.example.com"
+  },
+  {
+    "input": "https://AGENTS.EXAMPLE.COM:8443/",
+    "expected": "https://agents.example.com:8443"
+  },
+  {
+    "input": "https://[2001:DB8::1]:8443",
+    "expected": "https://[2001:db8::1]:8443"
+  },
+  {
+    "input": "https://[2001:db8:0:0:0:0:0:1]",
+    "expected": "https://[2001:db8::1]"
+  },
+  {
+    "input": "https://[2001:0db8:0000:0000:0001:0000:0000:0001]",
+    "expected": "https://[2001:db8::1:0:0:1]"
+  },
+  {
+    "input": "https://[2001:db8:0:1:1:1:1:1]",
+    "expected": "https://[2001:db8:0:1:1:1:1:1]"
+  },
+  {
+    "input": "https://[1:0:0:2:0:0:0:3]",
+    "expected": "https://[1:0:0:2::3]"
+  },
+  {
+    "input": "https://[::1]:443",
+    "expected": "https://[::1]"
+  },
+  {
+    "input": "https://[::ffff:127.0.0.1]",
+    "expected": null
+  },
+  {
+    "input": "https://[::ffff:7f00:1]",
+    "expected": null
+  },
+  {
+    "input": "https://[::ffff:203.0.113.10]",
+    "expected": null
+  },
+  {
+    "input": "http://[::ffff:127.0.0.1]:8081",
+    "expected": null
+  },
+  {
+    "input": "http://[0:0:0:0:0:ffff:7f00:1]",
+    "expected": null
+  },
+  {
+    "input": "https://[fe80::1%25eth0]",
+    "expected": null
+  },
+  {
+    "input": "https://[fe80::1%eth0]",
+    "expected": null
+  },
+  {
+    "input": "http://[::2]:8081",
+    "expected": null
+  },
+  {
+    "input": "https://agents.example.com:",
+    "expected": null
+  },
+  {
+    "input": "http://127.0.0.1:",
+    "expected": null
+  },
+  {
+    "input": "https://[::1]:",
+    "expected": null
+  },
+  {
+    "input": "https://agents.example.com:8443:9",
+    "expected": null
+  },
+  {
+    "input": "https://2001:db8::1",
+    "expected": null
+  },
+  {
+    "input": "https://agents.example.com:000443",
+    "expected": null
+  },
+  {
+    "input": "http://127.000.000.001:8081",
+    "expected": null
+  },
+  {
+    "input": "http://127.1:8081",
+    "expected": null
+  },
+  {
+    "input": "http://2130706433:8081",
+    "expected": null
+  },
+  {
+    "input": "http://0x7f.0.0.1:8081",
+    "expected": null
+  },
+  {
+    "input": "https://agents.example.com:+443",
+    "expected": null
+  },
+  {
+    "input": "https://agents.example.com:\uff14\uff14\uff13",
+    "expected": null
+  },
+  {
+    "input": "https://[2001:db8::1::2]",
+    "expected": null
+  },
+  {
+    "input": "https://[2001:db8:0:0:0:0:0:0:1]",
+    "expected": null
+  },
+  {
+    "input": "https://[12345::1]",
+    "expected": null
+  },
+  {
+    "input": "https://[::1]x",
+    "expected": null
+  },
+  {
+    "input": "https://203.0.113.10",
+    "expected": "https://203.0.113.10"
+  },
+  {
+    "input": "https://203.0.113.010",
+    "expected": null
+  },
+  {
+    "input": "https://[2001:db8::]",
+    "expected": "https://[2001:db8::]"
+  },
+  {
+    "input": "https://[::]",
+    "expected": "https://[::]"
+  },
+  {
+    "input": "https://[1::]:8443",
+    "expected": "https://[1::]:8443"
+  }
+]

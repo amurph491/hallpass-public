@@ -1,0 +1,90 @@
+# Demo/sandbox server image, and the bridge downloads set. Stages:
+#
+#   deps            sbt and every dependency of the build, resolved from the build
+#                   definition alone, so a source change does not download them again
+#   build           compiles the gateway and stages its runtime classpath
+#   bridge-build    stages the bridge runtime classpath (shares build's compiled output)
+#   bridge-package  packages bridge.tar.gz, SHA256SUMS, VERSION and install.sh
+#   bridge-dist     FROM scratch, only the downloads files
+#   (last)          the API image; this is the default target and what Compose builds
+#
+# API image (default target):
+#   docker build -f Dockerfile.demo-api -t hallpass-demo-api .
+#
+# Bridge downloads set, written to a directory on the host:
+#   docker build -f Dockerfile.demo-api --target bridge-dist \
+#     --build-arg HALLPASS_SOURCE_COMMIT=$(git rev-parse HEAD) \
+#     --output type=local,dest=./downloads .
+#
+# Source metadata comes from build arguments, because .git is not in the build
+# context. HALLPASS_SOURCE_COMMIT defaults to "unknown", HALLPASS_SOURCE_TAG to none,
+# and HALLPASS_SOURCE_DIRTY to "unknown" (recorded as null in the archive manifest,
+# never as a claim that the tree was dirty). See scripts/package-bridge.py.
+
+FROM sbtscala/scala-sbt:eclipse-temurin-21.0.7_6_1.10.11_3.7.0 AS deps
+
+WORKDIR /app
+# Only the build definition, so this layer and the resolution below are reused
+# until build.sbt, the sbt version, or the plugins change. .sbtopts matters: it
+# (--no-share, sbt.coursier.home) puts sbt's boot, global, Ivy and coursier state
+# under /app/project/, so the caches below live in this layer and are the ones
+# every later sbt command in this image uses. Without it the caches would be
+# filled in a different place (~/.cache) from the one the build reads, and every
+# source change would download sbt, Scala and all dependencies again.
+COPY build.sbt .sbtopts ./
+COPY project/build.properties project/plugins.sbt project/
+# `update` resolves every module's dependencies (including test scope and sbt
+# plugins) into those caches.
+RUN sbt --error update
+
+FROM deps AS build
+
+COPY . .
+
+# Build the gateway and collect its complete runtime classpath for a direct
+# Java launch. Database configuration is supplied by the composition root;
+# downstream provider credentials remain outside this image.
+RUN sbt --error 'gateway / stageRuntimeClasspath'
+
+FROM build AS bridge-build
+
+# The bridge's production classpath is edge-only (see build.sbt); staging it
+# reuses the compiled api module from the stage above.
+RUN sbt --error 'bridge / stageRuntimeClasspath'
+
+FROM python:3.13-alpine AS bridge-package
+
+WORKDIR /pkg
+COPY --from=bridge-build /app/bridge/target/bridge-dist/lib lib/
+COPY build.sbt ./
+COPY bridge/bin bridge/bin/
+COPY bridge/install.sh bridge/install.sh
+COPY scripts/package-bridge.py scripts/package-bridge.py
+
+ARG HALLPASS_SOURCE_COMMIT=unknown
+ARG HALLPASS_SOURCE_TAG=
+ARG HALLPASS_SOURCE_DIRTY=unknown
+RUN python3 scripts/package-bridge.py \
+      --lib-dir lib --bin-dir bridge/bin --install-sh bridge/install.sh --build-sbt build.sbt \
+      --output /out \
+      --commit "$HALLPASS_SOURCE_COMMIT" --tag "$HALLPASS_SOURCE_TAG" --dirty "$HALLPASS_SOURCE_DIRTY"
+
+FROM scratch AS bridge-dist
+
+COPY --from=bridge-package /out/ /
+
+# The API image. Keep this the last stage: it is what a build without --target produces.
+FROM eclipse-temurin:21-jre AS api
+
+RUN useradd --create-home --shell /usr/sbin/nologin hallpass \
+ && mkdir -p /var/lib/hallpass-secrets \
+ && chown hallpass:hallpass /var/lib/hallpass-secrets
+WORKDIR /app
+
+COPY --from=build /app/.docker-stage/gateway/lib /opt/hallpass/lib
+COPY --chmod=755 docker/demo-api-entrypoint.sh /usr/local/bin/hallpass-demo-entrypoint
+
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/hallpass-demo-entrypoint"]
+CMD ["java", "-cp", "/opt/hallpass/lib/*", "run.hallpass.gateway.HallpassDemoApiMain"]

@@ -1,0 +1,29 @@
+.git
+.bsp
+.bloop
+.idea
+.metals
+.agents
+.claude
+.codex
+**/target
+.env
+.env.*
+.secrets/
+*.pem
+*.key
+demo-admin/node_modules
+demo-admin/dist
+**/node_modules
+dist/
+**/__pycache__/
+*.pyc
+.docker-stage/
+# Local sbt state (.sbtopts keeps it under project/). The image builds its own in the deps stage of
+# Dockerfile.demo-api; copying a developer's would add hundreds of MB to the context and mix caches.
+project/.boot
+project/.sbtboot
+project/.ivy
+project/.coursier
+# Built bridge downloads
+.downloads/

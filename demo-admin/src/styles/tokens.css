@@ -1,0 +1,110 @@
+/* Hallpass brand tokens: the marketing site's chalkboard green and school-bus
+   yellow (marketing/src/theme.css), without its desktop chrome.
+   Light and dark follow the system; [data-theme] forces one. */
+
+:root {
+  --sans: "Geist Variable", Arial, Helvetica, sans-serif;
+  --mono: "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --bg: #f6f8f2;
+  --surface: #ffffff;
+  --surface-2: #edf2e6;
+  --surface-hover: #f1f5eb;
+  --ink: #17211b;
+  --muted: #46544a;
+  --faint: #5b685d;
+  --rule: #d8e0cf;
+  --rule-strong: #c0ccb2;
+
+  --accent: #2f6b3a;
+  --accent-hover: #245a2f;
+  --accent-text: #2f6b3a;
+  --accent-soft: rgba(47, 107, 58, 0.09);
+  --on-accent: #ffffff;
+  --brand: #1f3d2b;
+  --highlight: #ffc72c;
+
+  --ok: #0f7148;
+  --ok-soft: rgba(15, 113, 72, 0.1);
+  --no: #b3261e;
+  --no-soft: rgba(179, 38, 30, 0.09);
+  --warn: #8a5300;
+  --warn-soft: rgba(196, 124, 0, 0.13);
+  --neutral-soft: rgba(70, 84, 74, 0.1);
+
+  --shadow-sm: 0 1px 2px rgba(16, 41, 26, 0.05);
+  --shadow: 0 1px 2px rgba(16, 41, 26, 0.04), 0 12px 32px -12px rgba(16, 41, 26, 0.14);
+  --shadow-lg: 0 2px 4px rgba(16, 41, 26, 0.06), 0 24px 64px -16px rgba(16, 41, 26, 0.28);
+  --scrim: rgba(16, 41, 26, 0.36);
+
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-lg: 10px;
+
+  --sidebar-width: 232px;
+  --topbar-height: 56px;
+
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1712;
+    --surface: #142019;
+    --surface-2: #1a2a20;
+    --surface-hover: #1b2b21;
+    --ink: #ecf2e6;
+    --muted: #b5c4b4;
+    --faint: #8a9a8b;
+    --rule: #27382d;
+    --rule-strong: #36493c;
+    --accent: #9fd18a;
+    --accent-hover: #b6e0a3;
+    --accent-text: #9fd18a;
+    --accent-soft: rgba(159, 209, 138, 0.1);
+    --on-accent: #0e1712;
+    --ok: #52d6a0;
+    --ok-soft: rgba(82, 214, 160, 0.12);
+    --no: #ff8a80;
+    --no-soft: rgba(255, 138, 128, 0.12);
+    --warn: #f5c26b;
+    --warn-soft: rgba(245, 194, 107, 0.13);
+    --neutral-soft: rgba(181, 196, 180, 0.1);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.2), 0 16px 40px -16px rgba(0, 0, 0, 0.5);
+    --shadow-lg: 0 2px 4px rgba(0, 0, 0, 0.3), 0 24px 64px -16px rgba(0, 0, 0, 0.7);
+    --scrim: rgba(3, 8, 5, 0.6);
+    --brand: #dfeccb;
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #0e1712;
+  --surface: #142019;
+  --surface-2: #1a2a20;
+  --surface-hover: #1b2b21;
+  --ink: #ecf2e6;
+  --muted: #b5c4b4;
+  --faint: #8a9a8b;
+  --rule: #27382d;
+  --rule-strong: #36493c;
+  --accent: #9fd18a;
+  --accent-hover: #b6e0a3;
+  --accent-text: #9fd18a;
+  --accent-soft: rgba(159, 209, 138, 0.1);
+  --on-accent: #0e1712;
+  --ok: #52d6a0;
+  --ok-soft: rgba(82, 214, 160, 0.12);
+  --no: #ff8a80;
+  --no-soft: rgba(255, 138, 128, 0.12);
+  --warn: #f5c26b;
+  --warn-soft: rgba(245, 194, 107, 0.13);
+  --neutral-soft: rgba(181, 196, 180, 0.1);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.2), 0 16px 40px -16px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 2px 4px rgba(0, 0, 0, 0.3), 0 24px 64px -16px rgba(0, 0, 0, 0.7);
+  --scrim: rgba(3, 8, 5, 0.6);
+  --brand: #dfeccb;
+  color-scheme: dark;
+}
