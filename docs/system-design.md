@@ -217,7 +217,7 @@ sequenceDiagram
   participant G as Tenant gate
   participant R as Revoke
   E->>G: shared (many at once)
-  R->>G: exclusive (queues; blocks new readers)
+  R->>G: exclusive (queues and blocks new readers)
   E->>G: release
   G-->>R: granted → commit revocation → release
   Note over E,G: next execution revalidates and is denied
