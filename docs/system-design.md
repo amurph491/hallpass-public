@@ -67,11 +67,11 @@ flowchart LR
   end
 
   PG[("PostgreSQL<br/>tenant data (RLS) · directory · gate locks")]
-  KMS["Vault Transit"]
+  KMS["Vault Transit (production)"]
   PROV["Providers"]
 
   BR -- "HTTPS + agent credential" --> AGL
-  UI -- "session cookie + CSRF" --> ADL
+  UI -- "session cookie · CSRF on writes" --> ADL
   AD --> PG
   AD --> KMS
   AD -- "server-side credential" --> PROV
@@ -96,32 +96,46 @@ are separate listeners so they can be exposed differently.
 |---|---|
 | Principal | `Human`, `Agent`, or `Service`. A model is execution context, not a principal. |
 | Resource | Protocol-independent node in a tree (GitHub installation → repository). |
-| Capability | Stable provider-neutral name plus action (`GitHub.Issue.Create` / `Write`). Tools map to capabilities explicitly; unmapped tools deny. |
+| Capability | Stable key (`GitHub.Issue.Create`), action (`Write`), and resource. Tools map to capabilities explicitly. Unmapped tools are denied. |
 | Policy | Versioned statements: subject, resource, actions, capability, constraints, effect (`Allow` / `RequireApproval` / `Deny`). |
 | Delegation | Grantor → grantee, a non-empty capability set, constraints, validity window, optional parent, revocation time. |
 | Constraint | Condition over typed facts from the call, e.g. `hubspot.properties ⊆ {dealstage, amount}`. |
 | Connection | How Hallpass authenticates to a provider. Separate from what any agent may do with it. |
 | Operation | Code-defined descriptor: tool, capability, action, argument decoder, resource locator, facts, provider client. |
 
+The diagram shows selected PostgreSQL relationships. Cardinalities reflect the schema.
+
 ```mermaid
 erDiagram
-  tenants ||--o{ principals : owns
-  principals ||--o| agents : "is"
-  agents ||--o{ agent_credentials : "verifiers only"
-  tenants ||--o{ resources : owns
-  resources ||--o{ resources : "parent of"
-  tools ||--o{ tool_capability_mappings : "maps to"
-  principals ||--o{ delegations : "grantor / grantee"
-  delegations ||--o{ delegations : "parent of"
-  delegations ||--|{ delegated_capabilities : grants
-  connections ||--o{ credential_references : uses
-  credential_references ||--o{ provider_secrets : "ciphertext versions"
-  authorization_requests ||--|| authorization_decisions : records
-  execution_audit_events ||--o{ execution_audit_event_delegations : evidence
+  tenants ||..o{ principals : owns
+  principals ||--o| agents : "agent subtype"
+  agents ||..o{ agent_credentials : "has credential verifiers"
+  tenants ||..o{ resources : owns
+  resources o|..o{ resources : "parent of"
+  resources ||--o| tools : "tool subtype"
+  connections o|..o{ resources : scopes
+  principals o|..o{ resources : "custodian of"
+  connections ||--o| credential_references : "holds current reference"
+  credential_references }o..o| provider_secrets : "opaque reference"
+  tools ||--o{ tool_capability_mappings : maps
+  capabilities ||--o{ tool_capability_mappings : "mapped by"
+  resources ||..o{ capabilities : scopes
+  policies ||..o{ policy_bindings : "assigned through"
+  principals ||..o{ delegations : grants
+  principals ||..o{ delegations : receives
+  delegations o|..o{ delegations : "parent of"
+  delegations ||--o{ delegated_capabilities : grants
+  capabilities ||--o{ delegated_capabilities : "granted through"
+  resources ||--o{ delegated_capabilities : "grant scope"
+  authorization_requests ||..o{ authorization_decisions : records
+  authorization_requests ||..o{ execution_audit_events : "has execution evidence"
+  execution_audit_events ||--o{ execution_audit_event_delegations : records
+  delegations ||..o{ execution_audit_event_delegations : "recorded in"
 ```
 
-Every tenant-owned table carries `tenant_id`, and every foreign key between them includes it, so a row cannot
-reference another tenant's row even with a valid ID.
+The application requires at least one capability per delegation and writes one decision with each journaled
+authorization request in the same transaction. The foreign keys shown between tenant-owned rows include `tenant_id`.
+The secret-store reference is resolved by the application and bound to the tenant and connection when encrypted.
 
 ---
 
@@ -133,11 +147,13 @@ The kernel is a pure function: `policies + delegation chain + request + time →
 flowchart TD
   A["Request"] --> T{"tenant matches<br/>resource tenant?"}
   T -- no --> D1["Deny"]
-  T -- yes --> C{"claimed chain == supplied chain?<br/>last grantee == subject?"}
+  T -- yes --> C{"Claimed and supplied chains match?<br/>If delegated, does the chain end at the subject?"}
   C -- no --> D1
-  C -- yes --> L["Each link, root first:<br/>linked · active · grants capability over<br/>an ancestor of the resource · constraints hold"]
+  C -- yes --> L["Each link, root first:<br/>linked · active · grants the capability on the<br/>target or a trusted ancestor · constraints hold"]
   L -- fails --> D1
-  L -- passes --> P["Match the ROOT's policies"]
+  L -- passes --> U{"Does the resource have a custodian<br/>different from the root of authority?"}
+  U -- yes --> D1
+  U -- no --> P["Match the root's policies"]
   P --> PR{"Deny > RequireApproval > Allow"}
   PR -- Deny / none --> D1
   PR -- RequireApproval --> AP["RequireApproval"]
@@ -176,19 +192,26 @@ sequenceDiagram
   A->>A: authenticate (tenant from verified state only)
   A->>T: call
   T->>T: decode args · resolve resource · load authority
-  T->>K: authorize
-  K-->>T: Authorized | Denied | ApprovalRequired
-  T->>X: lease bound to this exact invocation
-  X->>X: redeem once · verify invocation digest
-  X->>G: acquire shared
-  X->>X: revalidate · resolve credential · revalidate · confirm lock held
-  rect rgb(240,240,240)
-  Note over X,P: uncancelable
-  X->>P: request built from the resolved resource
-  X->>X: record audit outcome
+  T->>K: authorize, using approval if presented
+  K-->>T: Authorized, Denied, or ApprovalRequired
+  alt Authorized and any required approval is consumed
+    T->>X: execute with invocation-bound lease
+    X->>X: redeem once · verify digest · record redemption
+    X->>G: acquire shared
+    X->>X: revalidate · confirm lock held · resolve credential · revalidate
+    opt Authority is current and the gate is still held
+      Note over X,P: Dispatch and audit attempt are uncancelable
+      X->>P: request built from the resolved resource
+      P-->>X: result or provider failure
+      X->>X: attempt to record outcome
+    end
+    X->>G: release
+    X-->>T: execution result or failure
+  else Denied or awaiting approval
+    Note over T,X: No lease is issued
   end
-  X->>G: release
-  X-->>B: result / 403 / 409 approval_required / 502 outcome_unknown
+  T-->>A: call outcome
+  A-->>B: result or HTTP error
 ```
 
 - **Arguments are parsed once.** The value decoded before authorization is the value dispatched. The request is built
@@ -196,7 +219,8 @@ sequenceDiagram
 - **Leases are single-use, audience-bound, and bound to a digest of the exact invocation.** They are issued and redeemed
   in the same request on the same instance and never returned to the caller, so an in-memory store is correct with any
   number of instances.
-- **Dispatch and its audit record are uncancelable together,** so a disconnect cannot leave an unaudited side effect.
+- **Client cancellation waits for dispatch and the audit attempt.** If the completion audit write fails after dispatch,
+  Hallpass returns `outcome_unknown`.
 - **Tool visibility is not the security boundary.** `tools/list` hides unusable tools to help the model; a hidden tool
   called directly is still denied.
 
@@ -219,18 +243,20 @@ sequenceDiagram
   E->>G: shared (many at once)
   R->>G: exclusive (queues and blocks new readers)
   E->>G: release
-  G-->>R: granted → commit revocation → release
-  Note over E,G: next execution revalidates and is denied
+  G-->>R: exclusive lock granted
+  R->>R: commit revocation
+  R->>G: release
+  E->>G: acquire shared
+  Note over E,G: Revalidation denies execution under the revoked authority
 ```
 
 - Executions don't conflict with each other, so they share the gate. Authority changes are rare and human-initiated,
   so making them exclusive is cheap. A queued writer blocks new readers, so a revocation can't be starved. Tenants are
   independent.
 - **Production implementation:** Postgres session-level advisory locks (`pg_advisory_lock_shared` / `pg_advisory_lock`)
-  per tenant on a dedicated pool, with `lock_timeout`. Postgres releases a lock only when its session ends, so a
-  partitioned holder could outlive its lock until keepalive detects it. The executor re-checks `pg_locks` on its own
-  session immediately before dispatch, shrinking that window to milliseconds. A provider cannot be fenced, so the
-  window is bounded, not zero.
+  per tenant on a dedicated pool, with `lock_timeout`. A lock is released on unlock or when its session ends.
+  The executor re-checks `pg_locks` on the same session immediately before dispatch. A session can still be lost
+  between that check and sending the request, and the provider cannot verify the lock.
 - Any gate failure fails closed and is audited.
 
 ---
@@ -273,17 +299,19 @@ unknown credential gets the same 401. Human login is OIDC with PKCE; membership 
 stateDiagram-v2
   [*] --> Pending: call hits RequireApproval
   Pending --> Approved: root of authority approves
-  Pending --> Denied
-  Pending --> Expired: 15 min
-  Approved --> Consumed: identical retry, fully re-authorized
+  Pending --> Denied: root of authority denies
+  Pending --> Expired: deadline passes
+  Approved --> Expired: deadline passes before use
+  Approved --> Consumed: reauthorize identical retry and consume atomically
   Consumed --> [*]
   Denied --> [*]
   Expired --> [*]
 ```
 
-An approval covers exactly one invocation (same principal, invocation digest, capability, and policy version). Only the
-human whose policy is in force can decide; an agent can't approve its own request. The retry is authorized from
-scratch, so a revocation in between still wins, and editing the policy invalidates outstanding approvals.
+An approval covers exactly one invocation (same principal, invocation digest, capability, and policy version).
+Only the human whose policy is in force can decide. The retry is authorized from scratch, so revocation or a policy
+version change invalidates the prior approval. The deadline defaults to 15 minutes from creation. The diagram shows
+effective states. Postgres tracks expiration and consumption with timestamps.
 
 ---
 
